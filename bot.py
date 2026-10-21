@@ -8,6 +8,8 @@ Modules:
                the requester tapping Confirm first (approval-card model).
                Only whitelisted user IDs can use it at all.
   - minecraft: !mc status from the potofgreed Paper server + presence.
+  - watch:     potofgreed service health checks every 2 minutes -
+               DOWN / back-up alerts in the log channel, plus !status.
 
 Config lives in .env (see .env.example). The token never goes in code.
 """
@@ -46,6 +48,12 @@ AUDIT_CHANNEL_ID_RAW = os.environ.get("AUDIT_CHANNEL_ID", "").strip()
 AUDIT_CHANNEL_ID = int(AUDIT_CHANNEL_ID_RAW) if AUDIT_CHANNEL_ID_RAW.isdigit() else None
 # Minecraft server address for the status module.
 MC_ADDRESS = os.environ.get("MC_ADDRESS", "localhost:25565").strip()
+# Watch module: optional "Name=URL,Name=URL" HTTP check overrides.
+# Default checks are built from the MC_ADDRESS host (dashboard, Jellyfin).
+WATCH_URLS_RAW = os.environ.get("WATCH_URLS", "").strip()
+# Minecraft backups folder INSIDE the container (docker-compose mounts
+# the host folder read-only). Missing folder = freshness check skips.
+WATCH_BACKUP_DIR = os.environ.get("WATCH_BACKUP_DIR", "/backups").strip()
 
 intents = discord.Intents.default()
 intents.message_content = True  # privileged - enable in Dev Portal
@@ -99,6 +107,7 @@ async def help_cmd(ctx: commands.Context):
         f"`{PREFIX}play <song or URL>` add to the music queue\n"
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
         f"`{PREFIX}mc` Minecraft server status\n"
+        f"`{PREFIX}status` potofgreed service health (dashboard, Jellyfin, backups)\n"
         "Admins: mention me + plain English, e.g. `@HouseBot kick Marcus`, "
         "`@HouseBot create a private channel called planning for me and @Marcus` - "
         "anything destructive asks you to confirm first."
@@ -106,7 +115,7 @@ async def help_cmd(ctx: commands.Context):
 
 
 async def _load() -> None:
-    for ext in ("cogs.music", "cogs.admin", "cogs.minecraft"):
+    for ext in ("cogs.music", "cogs.admin", "cogs.minecraft", "cogs.watch"):
         await bot.load_extension(ext)
 
 

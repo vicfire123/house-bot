@@ -109,3 +109,12 @@ requirements.txt pins discord.py >= 2.5 plus the `davey` package for
 exactly this reason - a full rebuild (`docker compose up -d --build`)
 is the fix. Check the startup log line "discord.py version:" to prove
 what's running.
+
+Watch (anyone):
+- `!status` - live health of the Minecraft server, dashboard, Jellyfin,
+  and Minecraft backup freshness
+- Automatic alerts in the audit/log channel: a service has to fail two
+  checks in a row (checks run every 2 minutes) before a DOWN alert posts,
+  and one BACK UP message posts when it recovers. Silent while healthy.
+- HTTP checks are configurable in .env via WATCH_URLS (Name=URL pairs).
+  Backup freshness needs the read-only backups mount in docker-compose.yml.
