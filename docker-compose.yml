@@ -1,0 +1,8 @@
+services:
+  house-bot:
+    build: .
+    container_name: house-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # No ports: the bot dials OUT to Discord. Nothing exposed on the LAN.

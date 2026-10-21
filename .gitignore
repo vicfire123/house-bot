@@ -1,0 +1,4 @@
+# The real .env holds the bot token + whitelist IDs. NEVER commit it.
+.env
+__pycache__/
+*.pyc
