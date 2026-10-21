@@ -258,12 +258,18 @@ class Admin(commands.Cog):
                     if admin_role is not None:
                         overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True)
                     notes = " (private: hidden from @everyone)"
+                # discord.py 2.7 uses a MISSING sentinel for these
+                # parameters - passing overwrites=None explicitly is an
+                # error ("expects a dict"), so only pass what's set.
+                kwargs = {"reason": reason}
+                if category is not None:
+                    kwargs["category"] = category
+                if overwrites is not None:
+                    kwargs["overwrites"] = overwrites
                 if is_voice:
-                    ch = await guild.create_voice_channel(
-                        name, category=category, overwrites=overwrites, reason=reason)
+                    ch = await guild.create_voice_channel(name, **kwargs)
                     return f"Created voice channel **{ch.name}**{notes}."
-                ch = await guild.create_text_channel(
-                    _slug(name), category=category, overwrites=overwrites, reason=reason)
+                ch = await guild.create_text_channel(_slug(name), **kwargs)
                 return f"Created #{ch.name}{notes}."
             kind_word = "voice channel" if is_voice else "text channel"
             desc = f"Create {kind_word} **{name}**"
@@ -542,6 +548,23 @@ class Admin(commands.Cog):
 
     # ---------------- listener ----------------
 
+    def _triggered(self, message: discord.Message) -> bool:
+        """Mention detection, belt and braces: user object, raw mention
+        strings (both formats), and the bot's managed role - Discord's
+        autocomplete can insert any of them for "@VicBot"."""
+        if message.content.startswith("!do "):
+            return True
+        bot_id = self.bot.user.id
+        if any(m.id == bot_id for m in message.mentions):
+            return True
+        if f"<@{bot_id}>" in message.content or f"<@!{bot_id}>" in message.content:
+            return True
+        for role in message.role_mentions:
+            tags = getattr(role, "tags", None)
+            if tags is not None and getattr(tags, "bot_id", None) == bot_id:
+                return True
+        return False
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
@@ -551,8 +574,7 @@ class Admin(commands.Cog):
         if message.author.id not in self.admin_ids:
             return  # not whitelisted: total silence
 
-        triggered = self.bot.user in message.mentions or message.content.startswith("!do ")
-        if not triggered:
+        if not self._triggered(message):
             return
 
         action = self.parse(message)
