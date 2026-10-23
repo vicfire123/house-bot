@@ -9,4 +9,6 @@ services:
       # Read-only: lets the watch module check Minecraft backup freshness.
       # Left side is the host path - adjust if the backups live elsewhere.
       - /home/ebk/minecraft-backups:/backups:ro
+      # Read-only: weekly restore-test results the watch module announces.
+      - /home/ebk/restore-test-results.log:/restore-results.log:ro
     # No ports: the bot dials OUT to Discord. Nothing exposed on the LAN.

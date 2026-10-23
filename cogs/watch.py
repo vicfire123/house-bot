@@ -6,6 +6,8 @@ Checks every 2 minutes:
     (override with WATCH_URLS in .env as Name=URL pairs)
   - Minecraft backup freshness: newest file in the mounted backups
     folder must be under 26 hours old (skips itself if not mounted)
+  - Restore-test results: every new line in the mounted restore-test
+    results log gets announced - a FAIL posts loud, on purpose
 
 Alerting rule - signal, not noise: nothing posts while healthy.
 A check has to fail TWICE in a row before a DOWN alert fires, and
@@ -41,11 +43,19 @@ class Check:
 class Watch(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        from bot import MC_ADDRESS, WATCH_BACKUP_DIR, WATCH_URLS_RAW, audit
+        from bot import (
+            MC_ADDRESS,
+            WATCH_BACKUP_DIR,
+            WATCH_RESTORE_RESULTS,
+            WATCH_URLS_RAW,
+            audit,
+        )
 
         self._audit = audit
         self.mc_address = MC_ADDRESS
         self.backup_dir = WATCH_BACKUP_DIR
+        self.restore_results = WATCH_RESTORE_RESULTS
+        self._restore_seen = None  # lines of the results log already announced
 
         host = MC_ADDRESS.rsplit(":", 1)[0] if ":" in MC_ADDRESS else MC_ADDRESS
         if WATCH_URLS_RAW:
@@ -107,6 +117,65 @@ class Watch(commands.Cog):
             return True, f"newest backup is {age_h:.1f}h old"
         return False, f"newest backup is {age_h:.1f}h old (limit {BACKUP_MAX_AGE_HOURS}h)"
 
+    # ---------------- restore-test results: announce every new line ---------
+
+    def _restore_lines(self):
+        try:
+            with open(self.restore_results, encoding="utf-8") as fh:
+                return [ln.strip() for ln in fh if ln.strip()]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_restore_line(line):
+        # "2026-10-23T19:10:27+00:00 PASS backup=potofgreed-config-2026-10-22.tar.gz age_h=21 service=uptime-kuma http=302"
+        parts = line.split()
+        if len(parts) < 2 or parts[1] not in ("PASS", "FAIL"):
+            return None
+        fields = dict(p.split("=", 1) for p in parts[2:] if "=" in p)
+        return parts[0], parts[1] == "PASS", fields
+
+    async def _announce_restore_results(self):
+        lines = self._restore_lines()
+        if lines is None:
+            return
+        if self._restore_seen is None:
+            self._restore_seen = len(lines)  # seed: never replay history
+            return
+        for line in lines[self._restore_seen :]:
+            parsed = self._parse_restore_line(line)
+            if parsed is None:
+                continue
+            _when, ok, f = parsed
+            detail = (
+                f"backup `{f.get('backup', '?')}`, {f.get('age_h', '?')}h old"
+                f" at test time ({f.get('service', '?')})"
+            )
+            if ok:
+                await self._audit(
+                    None, f"✅ **Restore test PASSED** on potofgreed - {detail}."
+                )
+            else:
+                await self._audit(
+                    None,
+                    f"🔴 **Restore test FAILED** on potofgreed - {detail}."
+                    " Check ~/restore-test-results.log on the server.",
+                )
+        self._restore_seen = len(lines)
+
+    def _last_restore_result(self):
+        lines = self._restore_lines()
+        if not lines:
+            return None
+        parsed = self._parse_restore_line(lines[-1])
+        if parsed is None:
+            return None
+        when, ok, f = parsed
+        return ok, (
+            f"last run {when[:10]} - backup {f.get('age_h', '?')}h old"
+            f" ({f.get('backup', '?')})"
+        )
+
     # ---------------- state machine: alert on transitions only ----------------
 
     async def _apply(self, check: Check, result):
@@ -141,6 +210,7 @@ class Watch(commands.Cog):
             for name, url in self.http_checks:
                 await self._apply(self.http[name], await self._probe_http(session, url))
         await self._apply(self.backup, self._probe_backup())
+        await self._announce_restore_results()
 
     @watch_loop.before_loop
     async def _wait_ready(self):
@@ -159,6 +229,9 @@ class Watch(commands.Cog):
         ok, detail = self._probe_backup()
         if ok is not None:
             rows.append(("MC backups", ok, detail))
+        rt = self._last_restore_result()
+        if rt is not None:
+            rows.append(("Restore test", *rt))
         lines = ["**potofgreed status**"]
         for name, good, detail in rows:
             lines.append(f"{'🟢' if good else '🔴'} {name} - {detail}")

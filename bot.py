@@ -54,6 +54,9 @@ WATCH_URLS_RAW = os.environ.get("WATCH_URLS", "").strip()
 # Minecraft backups folder INSIDE the container (docker-compose mounts
 # the host folder read-only). Missing folder = freshness check skips.
 WATCH_BACKUP_DIR = os.environ.get("WATCH_BACKUP_DIR", "/backups").strip()
+# Restore-test results log INSIDE the container (docker-compose mounts
+# the host file read-only). The watch module announces each new result.
+WATCH_RESTORE_RESULTS = os.environ.get("WATCH_RESTORE_RESULTS", "/restore-results.log").strip()
 
 intents = discord.Intents.default()
 intents.message_content = True  # privileged - enable in Dev Portal
