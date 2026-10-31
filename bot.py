@@ -120,7 +120,7 @@ async def help_cmd(ctx: commands.Context):
         "pause / skip / stop / queue buttons posts with each track\n"
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
         f"`{PREFIX}panel` re-drop the music player panel at the bottom of the channel\n"
-        f"`{PREFIX}updates` last known patch / version for every tracked game, NVIDIA drivers and iOS (posts land in #game-updates)\n"
+        f"`{PREFIX}updates` last known patch / version for every tracked game, NVIDIA drivers and iOS, plus free game drops from Epic, Steam and GOG (posts land in #game-updates)\n"
         "Star a message with ⭐ and it lands in #starboard\n"
         f"`{PREFIX}mc` Minecraft server status\n"
         f"`{PREFIX}status` potofgreed service health (dashboard, Jellyfin, backups)\n"

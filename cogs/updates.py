@@ -2,7 +2,10 @@
 
 Victor's ask (2026-10-31, live deploy session): watch patch notes and
 version drops for the games and platforms the server cares about and
-post them to #game-updates. Feeds (10):
+post them to #game-updates. Feeds (13 - the last 3 added later the
+same day at Victor's ask: free game drops "everywhere, not just Epic";
+those post to #free-games IF that channel exists, else #game-updates -
+no new channel is required):
 
   Steam official news (ISteamNews, no key needed):
     - NBA 2K27 (app 4356430)       patch-note posts only
@@ -45,6 +48,7 @@ import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from html import unescape
 
 import aiohttp
 import discord
@@ -74,6 +78,14 @@ NVIDIA_URL = (
     "&pfID=623&osID=57&languageCode=1033&beta=0&isWHQL=0&dltype=-1"
     "&dch=1&upCRD=0&qnf=0&sort1=0&numberOfResults=1"
 )
+EPIC_URL = ("https://store-site-backend-static.ak.epicgames.com/"
+            "freeGamesPromotions?locale=en-US&country=US"
+            "&allowCountries=US")
+STEAM_FREE_URL = ("https://store.steampowered.com/search/results/"
+                  "?query&start=0&count=50&dynamic_data=&sort_by=_ASC"
+                  "&force_infinite=1&maxprice=free&specials=1"
+                  "&infinite=1")
+GOG_URL = "https://www.gog.com/en/"
 
 MONTHS = ("January", "February", "March", "April", "May", "June",
           "July", "August", "September", "October", "November", "December")
@@ -331,6 +343,94 @@ class Updates(commands.Cog):
             items.append(_item(node.findtext("guid") or title, title, link))
         return items
 
+    @staticmethod
+    def _parse_iso(value):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    async def _feed_epic_free(self):
+        data = await self._get_json(EPIC_URL)
+        if not data:
+            return None
+        try:
+            elements = data["data"]["Catalog"]["searchStore"]["elements"]
+        except Exception:
+            log.warning("Epic promotions payload had an unexpected shape")
+            return None
+        now = datetime.now(timezone.utc)
+        items = []
+        for el in elements:
+            try:
+                groups = (el.get("promotions") or {}).get(
+                    "promotionalOffers") or []
+                end = None
+                for group in groups:
+                    for offer in group.get("promotionalOffers") or []:
+                        setting = offer.get("discountSetting") or {}
+                        if setting.get("discountPercentage") != 0:
+                            continue
+                        start = self._parse_iso(offer.get("startDate"))
+                        stop = self._parse_iso(offer.get("endDate"))
+                        if start and stop and start <= now <= stop:
+                            end = stop
+                if end is None:
+                    continue  # not free right now (or only upcoming)
+                total = (el.get("price") or {}).get("totalPrice") or {}
+                if not total.get("originalPrice"):
+                    continue  # always-free F2P title, not a drop
+                title = (el.get("title") or "").strip()
+                slug = el.get("productSlug") or ""
+                url = ("https://www.epicgames.com/store/en-US/product/"
+                       + slug) if slug else \
+                    "https://www.epicgames.com/store/en-US/free-games"
+                items.append(_item(
+                    f"epic-{slug or title}", f"FREE on Epic: {title}",
+                    url, extra=f"Free until {end.strftime('%b %d')}"))
+            except Exception:
+                continue
+        return items
+
+    async def _feed_steam_free(self):
+        data = await self._get_json(STEAM_FREE_URL)
+        if not data or "results_html" not in data:
+            return None
+        items = []
+        chunks = re.split(r'<a href="https://store\.steampowered\.com/app/',
+                          data["results_html"])
+        for chunk in chunks[1:]:
+            m = re.match(r"(\d+)/", chunk)
+            if not m or "-100%" not in chunk:
+                continue
+            t = re.search(r'<span class="title">(.*?)</span>', chunk, re.S)
+            if not t:
+                continue
+            title = unescape(re.sub(r"<[^>]+>", "", t.group(1))).strip()
+            if not title:
+                continue
+            appid = m.group(1)
+            items.append(_item(
+                f"steamfree-{appid}", f"FREE on Steam: {title}",
+                f"https://store.steampowered.com/app/{appid}/"))
+        return items
+
+    async def _feed_gog_free(self):
+        page = await self._get_text(GOG_URL)
+        if page is None:
+            return None
+        m = re.search(
+            r'giveaway__overlay-link" href='
+            r'"https://www\.gog\.com/en/game/([a-z0-9_]+)"', page)
+        if not m:
+            return []  # no giveaway running right now
+        slug = m.group(1)
+        title = slug.replace("_", " ").title()
+        return [_item(f"gog-{slug}", f"FREE on GOG: {title}",
+                      f"https://www.gog.com/en/game/{slug}")]
+
     # ---------- engine ----------
 
     def _target_channel(self) -> discord.TextChannel | None:
@@ -395,8 +495,15 @@ class Updates(commands.Cog):
         else:
             fresh = items  # stored item scrolled out of the window
         fresh = fresh[:MAX_POSTS_PER_FEED]
+        target = channel
+        pref = feed.get("channel")
+        if pref and channel is not None:
+            found = discord.utils.get(channel.guild.text_channels,
+                                      name=pref)
+            if found is not None:
+                target = found
         for it in reversed(fresh):  # oldest first
-            await self._post(feed, it, channel)
+            await self._post(feed, it, target)
         self.state[key] = {"id": newest["id"], "label": newest["label"]}
         self._save()
 
@@ -482,6 +589,13 @@ FEEDS = [
      "color": 0xF1C40F, "fetch": "_feed_pokemon"},
     {"key": "ios", "name": "iOS Releases", "emoji": "🍎",
      "color": 0xA2AAAD, "fetch": "_feed_ios"},
+    {"key": "epic-free", "name": "Epic Free Games", "emoji": "🎁",
+     "color": 0x444444, "fetch": "_feed_epic_free", "channel": "free-games"},
+    {"key": "steam-free", "name": "Steam Freebies", "emoji": "🎁",
+     "color": 0x1B78C4, "fetch": "_feed_steam_free",
+     "channel": "free-games"},
+    {"key": "gog-free", "name": "GOG Giveaways", "emoji": "🎁",
+     "color": 0x86328A, "fetch": "_feed_gog_free", "channel": "free-games"},
 ]
 
 
