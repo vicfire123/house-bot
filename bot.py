@@ -11,8 +11,12 @@ Modules:
   - watch:     potofgreed service health checks every 2 minutes -
                DOWN / back-up alerts in the log channel, plus !status.
   - starboard: 1 ⭐ on any human message reposts it to #starboard.
-  - soundboard: !sfx plays the server's native Discord soundboard
-               sounds (guild sounds + defaults, via send_sound).
+  - updates:   patch / version tracker for 10 feeds (games, NVIDIA
+               drivers, iOS), posting to #game-updates every 3 hours.
+
+(cogs/soundboard.py still exists in the repo but is NOT loaded -
+Victor killed !sfx on 2026-10-31 after seeing the native Discord
+soundboard live: the bot layer added nothing.)
 
 Config lives in .env (see .env.example). The token never goes in code.
 """
@@ -116,7 +120,6 @@ async def help_cmd(ctx: commands.Context):
         "pause / skip / stop / queue buttons posts with each track\n"
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
         f"`{PREFIX}panel` re-drop the music player panel at the bottom of the channel\n"
-        f"`{PREFIX}sfx <name>` play a server soundboard sound (`{PREFIX}sfx list` to see them)\n"
         f"`{PREFIX}updates` last known patch / version for every tracked game, NVIDIA drivers and iOS (posts land in #game-updates)\n"
         "Star a message with ⭐ and it lands in #starboard\n"
         f"`{PREFIX}mc` Minecraft server status\n"
@@ -129,7 +132,7 @@ async def help_cmd(ctx: commands.Context):
 
 async def _load() -> None:
     for ext in ("cogs.music", "cogs.admin", "cogs.minecraft", "cogs.watch",
-                "cogs.starboard", "cogs.soundboard", "cogs.updates"):
+                "cogs.starboard", "cogs.updates"):
         await bot.load_extension(ext)
 
 
