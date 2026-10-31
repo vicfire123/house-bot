@@ -117,6 +117,7 @@ async def help_cmd(ctx: commands.Context):
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
         f"`{PREFIX}panel` re-drop the music player panel at the bottom of the channel\n"
         f"`{PREFIX}sfx <name>` play a server soundboard sound (`{PREFIX}sfx list` to see them)\n"
+        f"`{PREFIX}updates` last known patch / version for every tracked game, NVIDIA drivers and iOS (posts land in #game-updates)\n"
         "Star a message with ⭐ and it lands in #starboard\n"
         f"`{PREFIX}mc` Minecraft server status\n"
         f"`{PREFIX}status` potofgreed service health (dashboard, Jellyfin, backups)\n"
@@ -128,7 +129,7 @@ async def help_cmd(ctx: commands.Context):
 
 async def _load() -> None:
     for ext in ("cogs.music", "cogs.admin", "cogs.minecraft", "cogs.watch",
-                "cogs.starboard", "cogs.soundboard"):
+                "cogs.starboard", "cogs.soundboard", "cogs.updates"):
         await bot.load_extension(ext)
 
 
