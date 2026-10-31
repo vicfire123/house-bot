@@ -95,20 +95,31 @@ class Updates(commands.Cog):
     # ---------- lifecycle ----------
 
     async def cog_load(self) -> None:
-        timeout = aiohttp.ClientTimeout(total=30)
-        # trust_env: honor proxy env vars if the host ever sets them;
-        # with none set (the normal Docker case) this is a plain
-        # direct connection.
-        self.session = aiohttp.ClientSession(headers={"User-Agent": UA},
-                                             timeout=timeout, trust_env=True)
+        # NOTE: no HTTP session here. Sessions bind to the running
+        # event loop, so the session is created lazily on first use
+        # (see _ensure_session) - a session made at load time can end
+        # up bound to a loop that is no longer the bot's.
         self.poll_loop.start()
         log.info("updates tracker loaded: %d feeds, state=%s",
                  len(FEEDS), DATA_FILE)
 
     def cog_unload(self) -> None:
         self.poll_loop.cancel()
-        if self.session is not None:
-            asyncio.get_event_loop().create_task(self.session.close())
+        if self.session is not None and not self.session.closed:
+            try:
+                asyncio.get_event_loop().create_task(self.session.close())
+            except Exception:
+                pass
+
+    def _ensure_session(self) -> aiohttp.ClientSession:
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=30)
+            # trust_env: honor proxy env vars if the host ever sets
+            # them; with none set (the normal Docker case) this is a
+            # plain direct connection.
+            self.session = aiohttp.ClientSession(
+                headers={"User-Agent": UA}, timeout=timeout, trust_env=True)
+        return self.session
 
     # ---------- state ----------
 
@@ -142,7 +153,7 @@ class Updates(commands.Cog):
 
     async def _get_text(self, url: str) -> str | None:
         try:
-            async with self.session.get(url) as resp:
+            async with self._ensure_session().get(url) as resp:
                 if resp.status != 200:
                     log.warning("fetch %s -> HTTP %s", url, resp.status)
                     return None
@@ -414,6 +425,7 @@ class Updates(commands.Cog):
         if self._lock.locked():
             return
         async with self._lock:
+            log.info("updates poll running")
             channel = await self._resolve_channel()
             if channel is None:
                 return

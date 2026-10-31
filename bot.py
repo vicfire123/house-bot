@@ -141,5 +141,16 @@ if __name__ == "__main__":
         raise SystemExit("DISCORD_TOKEN is empty - copy .env.example to .env and fill it in.")
     import asyncio
 
-    asyncio.run(_load())
-    bot.run(TOKEN, log_handler=None)
+    async def _main() -> None:
+        # Load extensions and start the bot on ONE event loop. The old
+        # shape (asyncio.run(_load()) followed by bot.run()) ran cog
+        # setup on a throwaway loop that closed immediately, silently
+        # killing anything a cog started while loading - that is what
+        # strangled the updates tracker on 2026-10-31 (it logged
+        # "loaded", then never polled, and its HTTP session was bound
+        # to the dead loop).
+        async with bot:
+            await _load()
+            await bot.start(TOKEN)
+
+    asyncio.run(_main())
