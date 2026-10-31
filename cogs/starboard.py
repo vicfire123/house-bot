@@ -8,7 +8,9 @@ Spec (locked 2026-10-31, Victor's calls):
     the bot has Manage Channels).
   - Removing the last star deletes the starboard post; extra stars
     just update the count on the existing post, never a duplicate.
-  - #vicbot-logs (the audit channel) is never a source.
+  - Stars count in EVERY channel, #vicbot-logs included (Victor
+    reversed the original audit-channel exclusion on 2026-10-31,
+    during the live deploy tests).
   - Reactions inside #starboard itself are ignored (no loops).
 
 The message-id -> starboard-post-id map is kept in a JSON file so a
@@ -29,9 +31,6 @@ log = logging.getLogger("housebot.starboard")
 
 STAR_EMOJI = "⭐"
 STARBOARD_NAME = "starboard"
-
-AUDIT_CHANNEL_ID_RAW = os.environ.get("AUDIT_CHANNEL_ID", "").strip()
-AUDIT_CHANNEL_ID = int(AUDIT_CHANNEL_ID_RAW) if AUDIT_CHANNEL_ID_RAW.isdigit() else None
 
 
 def _data_path() -> str:
@@ -196,11 +195,10 @@ class Starboard(commands.Cog):
         return str(payload.emoji) == STAR_EMOJI
 
     def _ignored(self, payload: discord.RawReactionActionEvent) -> bool:
-        if payload.guild_id is None:
-            return True
-        if AUDIT_CHANNEL_ID is not None and payload.channel_id == AUDIT_CHANNEL_ID:
-            return True
-        return False
+        # DMs have no starboard. Every guild channel counts, including
+        # #vicbot-logs (Victor's call, 2026-10-31). #starboard itself is
+        # filtered inside _sync so posts cannot loop.
+        return payload.guild_id is None
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
