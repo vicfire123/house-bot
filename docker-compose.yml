@@ -11,4 +11,10 @@ services:
       - /home/ebk/minecraft-backups:/backups:ro
       # Read-only: weekly restore-test results the watch module announces.
       - /home/ebk/restore-test-results.log:/restore-results.log:ro
+      # Writable: starboard message map lives here so it survives
+      # container rebuilds and git pulls.
+      - bot-data:/data
     # No ports: the bot dials OUT to Discord. Nothing exposed on the LAN.
+
+volumes:
+  bot-data:

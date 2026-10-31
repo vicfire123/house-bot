@@ -10,6 +10,9 @@ Modules:
   - minecraft: !mc status from the potofgreed Paper server + presence.
   - watch:     potofgreed service health checks every 2 minutes -
                DOWN / back-up alerts in the log channel, plus !status.
+  - starboard: 1 ⭐ on any human message reposts it to #starboard.
+  - soundboard: !sfx plays the server's native Discord soundboard
+               sounds (guild sounds + defaults, via send_sound).
 
 Config lives in .env (see .env.example). The token never goes in code.
 """
@@ -107,8 +110,11 @@ async def on_command_error(ctx: commands.Context, error: Exception):
 async def help_cmd(ctx: commands.Context):
     await ctx.send(
         "**House Bot**\n"
-        f"`{PREFIX}play <song or URL>` add to the music queue\n"
+        f"`{PREFIX}play <song or URL>` add to the music queue - a panel with "
+        "pause / skip / stop / queue buttons posts with each track\n"
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
+        f"`{PREFIX}sfx <name>` play a server soundboard sound (`{PREFIX}sfx list` to see them)\n"
+        "Star a message with ⭐ and it lands in #starboard\n"
         f"`{PREFIX}mc` Minecraft server status\n"
         f"`{PREFIX}status` potofgreed service health (dashboard, Jellyfin, backups)\n"
         "Admins: mention me + plain English, e.g. `@HouseBot kick Marcus`, "
@@ -118,7 +124,8 @@ async def help_cmd(ctx: commands.Context):
 
 
 async def _load() -> None:
-    for ext in ("cogs.music", "cogs.admin", "cogs.minecraft", "cogs.watch"):
+    for ext in ("cogs.music", "cogs.admin", "cogs.minecraft", "cogs.watch",
+                "cogs.starboard", "cogs.soundboard"):
         await bot.load_extension(ext)
 
 

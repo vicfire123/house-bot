@@ -195,6 +195,98 @@ class GuildPlayer:
         self.current: Track | None = None
         self.task: asyncio.Task | None = None
         self.text_channel: discord.TextChannel | None = None
+        # Music player panel (spec locked 2026-10-31): one live panel
+        # message at a time, replaced fresh on every new track.
+        self.panel_message: discord.Message | None = None
+        self.panel_view: "PlayerPanelView | None" = None
+
+
+class PlayerPanelView(discord.ui.View):
+    """Buttons on the Now Playing panel.
+
+    Access rule (Victor's call, 2026-10-31): anyone IN the voice
+    channel with the bot can press any button, stop included. Anyone
+    outside it is ignored with a short ephemeral note. Views live only
+    for their track - a fresh panel (and view) is posted per track, so
+    nothing here is registered as a persistent view.
+    """
+
+    def __init__(self, music: "Music", guild_id: int):
+        super().__init__(timeout=None)
+        self.music = music
+        self.guild_id = guild_id
+
+        self.pause_button = discord.ui.Button(
+            label="Pause", emoji="⏸️", style=discord.ButtonStyle.secondary)
+        self.pause_button.callback = self._toggle_pause
+        self.add_item(self.pause_button)
+
+        skip_button = discord.ui.Button(
+            label="Skip", emoji="⏭️", style=discord.ButtonStyle.primary)
+        skip_button.callback = self._skip
+        self.add_item(skip_button)
+
+        stop_button = discord.ui.Button(
+            label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger)
+        stop_button.callback = self._stop
+        self.add_item(stop_button)
+
+        queue_button = discord.ui.Button(
+            label="Queue", emoji="📋", style=discord.ButtonStyle.secondary)
+        queue_button.callback = self._queue
+        self.add_item(queue_button)
+
+    def set_paused(self, paused: bool) -> None:
+        self.pause_button.label = "Resume" if paused else "Pause"
+        self.pause_button.emoji = "▶️" if paused else "⏸️"
+
+    async def _toggle_pause(self, interaction: discord.Interaction):
+        if not await self.music._panel_check(interaction):
+            return
+        guild = interaction.guild
+        vc = guild.voice_client if guild else None
+        if vc is None:
+            await interaction.response.send_message(
+                "Nothing is connected.", ephemeral=True)
+            return
+        p = self.music.player(guild.id)
+        if vc.is_playing():
+            vc.pause()
+            self.set_paused(True)
+            await interaction.response.edit_message(
+                embed=self.music._panel_embed(p, paused=True), view=self)
+        elif vc.is_paused():
+            vc.resume()
+            self.set_paused(False)
+            await interaction.response.edit_message(
+                embed=self.music._panel_embed(p, paused=False), view=self)
+        else:
+            await interaction.response.send_message(
+                "Nothing is playing.", ephemeral=True)
+
+    async def _skip(self, interaction: discord.Interaction):
+        if not await self.music._panel_check(interaction):
+            return
+        vc = interaction.guild.voice_client if interaction.guild else None
+        await interaction.response.defer()
+        if vc and (vc.is_playing() or vc.is_paused()):
+            # vc.stop() ends the track; the queue runner posts the
+            # next track's fresh panel and deletes this one.
+            vc.stop()
+
+    async def _stop(self, interaction: discord.Interaction):
+        if not await self.music._panel_check(interaction):
+            return
+        await interaction.response.defer()
+        if interaction.guild is not None:
+            await self.music._stop_player(interaction.guild)
+
+    async def _queue(self, interaction: discord.Interaction):
+        if not await self.music._panel_check(interaction):
+            return
+        p = self.music.player(interaction.guild.id)
+        text = self.music._queue_text(p)
+        await interaction.response.send_message(text[:1900], ephemeral=True)
 
 
 class Music(commands.Cog):
@@ -220,12 +312,111 @@ class Music(commands.Cog):
             except Exception:
                 pass
 
+    # ---------- music player panel ----------
+
+    def _queue_text(self, p: GuildPlayer) -> str:
+        lines = []
+        if p.current:
+            lines.append(f"Now: **{p.current.title}**")
+        pending = list(p.queue._queue)  # display only
+        for i, t in enumerate(pending, 1):
+            lines.append(f"{i}. {t.title}")
+            if i >= 15:
+                lines.append(f"...and {len(pending) - 15} more")
+                break
+        return "\n".join(lines) if lines else "Queue is empty."
+
+    def _panel_embed(self, p: GuildPlayer, paused: bool = False) -> discord.Embed:
+        track = p.current
+        embed = discord.Embed(
+            title=track.title if track else "Nothing playing",
+            url=track.webpage or None if track else None,
+            color=discord.Color.blurple(),
+        )
+        if track:
+            embed.set_author(name="Now playing")
+            embed.add_field(name="Requested by", value=track.requester, inline=True)
+            embed.add_field(name="Status", value="Paused" if paused else "Playing",
+                            inline=True)
+            pending = list(p.queue._queue)  # display only
+            if pending:
+                embed.add_field(name="Up next", value=pending[0].title[:1024], inline=False)
+            embed.set_footer(text=f"{len(pending)} in queue - "
+                                  "buttons work for anyone in the voice channel")
+        return embed
+
+    async def _panel_check(self, interaction: discord.Interaction) -> bool:
+        """Panel gate: the presser must be in the bot's voice channel."""
+        member = interaction.user
+        vc = interaction.guild.voice_client if interaction.guild else None
+        ok = (
+            isinstance(member, discord.Member)
+            and member.voice is not None
+            and member.voice.channel is not None
+            and vc is not None
+            and member.voice.channel == vc.channel
+        )
+        if not ok:
+            try:
+                await interaction.response.send_message(
+                    "Hop in the voice channel with the music first - "
+                    "panel buttons only work in there.", ephemeral=True)
+            except Exception:
+                pass
+        return ok
+
+    async def _delete_panel(self, p: GuildPlayer) -> None:
+        message, view = p.panel_message, p.panel_view
+        p.panel_message, p.panel_view = None, None
+        if view is not None:
+            view.stop()
+        if message is not None:
+            try:
+                await message.delete()
+            except Exception:
+                pass  # already deleted by hand, or perms - both fine
+
+    async def _post_panel(self, p: GuildPlayer) -> None:
+        """Fresh panel per track: old panel deleted, new one posted."""
+        await self._delete_panel(p)
+        if p.text_channel is None or p.current is None:
+            return
+        view = PlayerPanelView(self, p.text_channel.guild.id)
+        try:
+            message = await p.text_channel.send(embed=self._panel_embed(p), view=view)
+        except Exception:
+            log.exception("panel post failed")
+            return
+        p.panel_message, p.panel_view = message, view
+
+    async def _refresh_panel(self, p: GuildPlayer, paused: bool) -> None:
+        if p.panel_message is None:
+            return
+        if p.panel_view is not None:
+            p.panel_view.set_paused(paused)
+        try:
+            await p.panel_message.edit(embed=self._panel_embed(p, paused=paused),
+                                        view=p.panel_view)
+        except Exception:
+            pass  # panel deleted by hand - the next track replaces it
+
+    async def _stop_player(self, guild: discord.Guild) -> None:
+        """Shared stop path for the !stop command and the panel button."""
+        p = self.player(guild.id)
+        while not p.queue.empty():
+            p.queue.get_nowait()
+        await self._delete_panel(p)
+        vc = guild.voice_client
+        if vc:
+            vc.stop()
+
     async def _run_queue(self, guild: discord.Guild):
         p = self.player(guild.id)
         try:
             while True:
                 vc = guild.voice_client
                 if vc is None or not vc.is_connected():
+                    await self._delete_panel(p)
                     await self._announce(p, "I lost the voice connection - queue stopped. "
                                             "Run !play again when you're in a channel.")
                     return
@@ -233,6 +424,7 @@ class Music(commands.Cog):
                     track = await asyncio.wait_for(p.queue.get(), timeout=300)
                 except asyncio.TimeoutError:
                     # Idle 5 minutes with an empty queue - leave the channel.
+                    await self._delete_panel(p)
                     await vc.disconnect()
                     return
                 # Lazy entries (from Spotify playlists) resolve right now.
@@ -252,7 +444,6 @@ class Music(commands.Cog):
                     await self._announce(p, f"Skipped **{track.title}** - audio engine error: {e}")
                     p.current = None
                     continue
-                await self._announce(p, f"Now playing: **{track.title}** (added by {track.requester})")
                 done = asyncio.Event()
                 try:
                     vc.play(source, after=lambda _e: self.bot.loop.call_soon_threadsafe(done.set))
@@ -261,6 +452,8 @@ class Music(commands.Cog):
                     await self._announce(p, f"Couldn't start **{track.title}**: {e}")
                     p.current = None
                     continue
+                # Fresh Now Playing panel for this track (deletes the old one).
+                await self._post_panel(p)
                 await done.wait()
                 p.current = None
         except Exception:
@@ -268,6 +461,7 @@ class Music(commands.Cog):
             await self._announce(p, "The music player hit an error and stopped - "
                                     "the details are in the bot log. Run !play to restart it.")
         finally:
+            await self._delete_panel(p)
             p.task = None
 
     @commands.command(name="play")
@@ -321,6 +515,7 @@ class Music(commands.Cog):
         vc = ctx.guild.voice_client
         if vc and vc.is_playing():
             vc.pause()
+            await self._refresh_panel(self.player(ctx.guild.id), paused=True)
             await ctx.send("Paused.")
 
     @commands.command(name="resume")
@@ -328,39 +523,27 @@ class Music(commands.Cog):
         vc = ctx.guild.voice_client
         if vc and vc.is_paused():
             vc.resume()
+            await self._refresh_panel(self.player(ctx.guild.id), paused=False)
             await ctx.send("Resumed.")
 
     @commands.command(name="stop")
     async def stop(self, ctx: commands.Context):
         """Stop playback and clear the queue (stays in the channel)."""
-        p = self.player(ctx.guild.id)
-        while not p.queue.empty():
-            p.queue.get_nowait()
-        vc = ctx.guild.voice_client
-        if vc:
-            vc.stop()
+        await self._stop_player(ctx.guild)
         await ctx.send("Stopped, queue cleared.")
 
     @commands.command(name="leave")
     async def leave(self, ctx: commands.Context):
         vc = ctx.guild.voice_client
         if vc:
+            await self._delete_panel(self.player(ctx.guild.id))
             await vc.disconnect()
             await ctx.send("Left the voice channel.")
 
     @commands.command(name="queue")
     async def show_queue(self, ctx: commands.Context):
         p = self.player(ctx.guild.id)
-        lines = []
-        if p.current:
-            lines.append(f"Now: **{p.current.title}**")
-        pending = list(p.queue._queue)  # display only
-        for i, t in enumerate(pending, 1):
-            lines.append(f"{i}. {t.title}")
-            if i >= 15:
-                lines.append(f"...and {len(pending) - 15} more")
-                break
-        await ctx.send("\n".join(lines) if lines else "Queue is empty.")
+        await ctx.send(self._queue_text(p))
 
     @commands.command(name="np")
     async def now_playing(self, ctx: commands.Context):
