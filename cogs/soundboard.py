@@ -43,19 +43,26 @@ class Soundboard(commands.Cog):
             log.exception("default soundboard fetch failed")
         return guild_sounds, default_sounds
 
+    @staticmethod
+    def _emoji_of(sound) -> str:
+        # discord.py exposes the sound's emoji as .emoji (a PartialEmoji
+        # or None) on both guild and default sounds - there is NO
+        # .emoji_name attribute (that was the 2026-10-31 live bug:
+        # every !sfx call crashed building this list).
+        emoji = getattr(sound, "emoji", None)
+        return str(emoji) if emoji is not None else "🔊"
+
     async def _list_text(self, guild: discord.Guild) -> str:
         guild_sounds, default_sounds = await self._inventory(guild)
         lines = []
         if guild_sounds:
             lines.append("**Server sounds:**")
             for s in guild_sounds:
-                emoji = s.emoji_name or "🔊"
-                lines.append(f"{emoji} {s.name}")
+                lines.append(f"{self._emoji_of(s)} {s.name}")
         if default_sounds:
             lines.append("**Discord defaults:**")
             for s in default_sounds:
-                emoji = getattr(s, "emoji_name", None) or "🔊"
-                lines.append(f"{emoji} {s.name}")
+                lines.append(f"{self._emoji_of(s)} {s.name}")
         if not lines:
             return ("No soundboard sounds found. Add some in "
                     "Server Settings > Soundboard, then run `!sfx list` again.")
@@ -122,12 +129,15 @@ class Soundboard(commands.Cog):
 
     @sfx.error
     async def sfx_error(self, ctx: commands.Context, error: Exception):
+        # Cooldowns get the friendly note here (the global handler in
+        # bot.py skips cooldowns). Anything else is only logged here -
+        # the global handler reports it once, so users don't see the
+        # same error twice (the 2026-10-31 double-error screenshot).
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"Slow down - `!sfx` again in {error.retry_after:.0f}s.",
                            delete_after=5)
         else:
             log.error("sfx failed: %s", error)
-            await ctx.send(f"That hit an error: {error}")
 
 
 async def setup(bot: commands.Bot):

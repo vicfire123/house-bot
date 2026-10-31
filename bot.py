@@ -101,6 +101,8 @@ async def on_command_error(ctx: commands.Context, error: Exception):
                        f"{ctx.command.signature}`" if ctx.command else "Missing an argument.")
     elif isinstance(error, commands.CommandNotFound):
         pass  # not every !word is a command; stay quiet
+    elif isinstance(error, commands.CommandOnCooldown):
+        pass  # per-command error handlers report their own cooldowns
     else:
         log.error("command %s failed: %s", ctx.command, error)
         await ctx.send(f"That command hit an error: {error}")
