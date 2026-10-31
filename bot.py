@@ -115,6 +115,7 @@ async def help_cmd(ctx: commands.Context):
         f"`{PREFIX}play <song or URL>` add to the music queue - a panel with "
         "pause / skip / stop / queue buttons posts with each track\n"
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
+        f"`{PREFIX}panel` re-drop the music player panel at the bottom of the channel\n"
         f"`{PREFIX}sfx <name>` play a server soundboard sound (`{PREFIX}sfx list` to see them)\n"
         "Star a message with ⭐ and it lands in #starboard\n"
         f"`{PREFIX}mc` Minecraft server status\n"

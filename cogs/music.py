@@ -376,14 +376,16 @@ class Music(commands.Cog):
             except Exception:
                 pass  # already deleted by hand, or perms - both fine
 
-    async def _post_panel(self, p: GuildPlayer) -> None:
+    async def _post_panel(self, p: GuildPlayer, paused: bool = False) -> None:
         """Fresh panel per track: old panel deleted, new one posted."""
         await self._delete_panel(p)
         if p.text_channel is None or p.current is None:
             return
         view = PlayerPanelView(self, p.text_channel.guild.id)
+        view.set_paused(paused)
         try:
-            message = await p.text_channel.send(embed=self._panel_embed(p), view=view)
+            message = await p.text_channel.send(
+                embed=self._panel_embed(p, paused=paused), view=view)
         except Exception:
             log.exception("panel post failed")
             return
@@ -552,6 +554,25 @@ class Music(commands.Cog):
             await ctx.send(f"Now playing: **{p.current.title}**\n{p.current.webpage}")
         else:
             await ctx.send("Nothing is playing.")
+
+    @commands.command(name="panel")
+    async def panel(self, ctx: commands.Context):
+        """!panel - re-drop the player panel at the bottom of this channel.
+
+        Discord can't pin a message to the bottom, so this is the
+        on-demand version (Victor's pick, 2026-10-31, over auto-sticky
+        reposting): the old panel is deleted and a fresh one, showing
+        the real pause state, posts right here. Buttons still only
+        work for people in the voice channel.
+        """
+        p = self.player(ctx.guild.id)
+        if p.current is None:
+            await ctx.send("Nothing is playing - no panel to drop. Run !play first.")
+            return
+        p.text_channel = ctx.channel
+        vc = ctx.guild.voice_client
+        paused = bool(vc and vc.is_paused())
+        await self._post_panel(p, paused=paused)
 
 
 async def setup(bot: commands.Bot):
