@@ -2,10 +2,11 @@
 
 Victor's ask (2026-10-31, live deploy session): watch patch notes and
 version drops for the games and platforms the server cares about and
-post them to #game-updates. Feeds (13 - the last 3 added later the
-same day at Victor's ask: free game drops "everywhere, not just Epic";
-those post to #free-games IF that channel exists, else #game-updates -
-no new channel is required):
+post them to #game-updates. Feeds (14 - feeds 11-13 added later on
+2026-10-31 at Victor's ask: free game drops "everywhere, not just
+Epic"; those post to #free-games IF that channel exists, else
+#game-updates. Feed 14, COD Warzone, added 2026-11-07 at Victor's
+ask):
 
   Steam official news (ISteamNews, no key needed):
     - NBA 2K27 (app 4356430)       patch-note posts only
@@ -13,7 +14,12 @@ no new channel is required):
     - Warframe (app 230410)        update + announcement posts
     - Phantom Blade Zero (app 4115450) patch / update posts
   Web pages:
-    - COD MW4      callofduty.com living patch-notes page (dated sections)
+    - COD MW4      callofduty.com patch-notes index -> current MW4 page
+    - COD Warzone  callofduty.com patch-notes index -> current Warzone
+                   page (the index lists each series newest first, so
+                   season changes are picked up on their own; both COD
+                   feeds fall back to their last known page if the
+                   index ever stops listing links)
     - GTA 6 (PS5)  rockstargames.com/VI page watcher until launch
                    (Nov 19, 2026 per the page itself), then the same
                    watcher catches the flip to available / new info
@@ -68,8 +74,13 @@ DATA_FILE = os.environ.get(
     else os.path.join(os.path.dirname(__file__), "updates-state.json"),
 )
 
+COD_INDEX_URL = "https://www.callofduty.com/patchnotes/"
+# Fallbacks if the index ever stops listing links: the last known
+# living pages for each COD series.
 COD_URL = ("https://www.callofduty.com/patchnotes/2026/10/"
            "call-of-duty-modern-warfare-4-launch-patch-notes")
+WARZONE_URL = ("https://www.callofduty.com/patchnotes/2026/11/"
+               "call-of-duty-mw4-warzone-season-1-patch-notes")
 GTA_URL = "https://www.rockstargames.com/VI"
 APPLE_RSS = "https://developer.apple.com/news/releases/rss/releases.rss"
 NVIDIA_URL = (
@@ -233,21 +244,55 @@ class Updates(commands.Cog):
                                           "fix"))
         return await self._steam_news(4115450, keep)
 
-    async def _feed_cod(self):
-        html = await self._get_text(COD_URL)
+    async def _cod_current_url(self, marker: str, exclude: str = ""):
+        """First patch-notes link for a COD series on the official
+        index. The index lists each series newest first, so the first
+        match is the series' current living page - a new season or
+        Reloaded page takes over automatically when it publishes."""
+        index = await self._get_text(COD_INDEX_URL)
+        if index is None:
+            return None
+        hrefs = re.findall(r'href="([^"]*patchnotes[^"]*)"', index)
+        for href in dict.fromkeys(hrefs):  # page order, de-duplicated
+            low = href.lower()
+            if marker in low and "patch-notes" in low \
+                    and (not exclude or exclude not in low):
+                if href.startswith("/"):
+                    href = "https://www.callofduty.com" + href
+                return href
+        return None
+
+    async def _cod_page_latest(self, url: str):
+        html = await self._get_text(url)
         if html is None:
             return None
         dates = DATE_RE.findall(html)
         if not dates:
-            log.warning("COD page fetched but no dated sections found")
+            log.warning("COD page fetched but no dated sections: %s", url)
             return None
+        latest = max(dates,
+                     key=lambda d: datetime.strptime(d, "%B %d, %Y"))
+        return url, latest
 
-        def key(d: str) -> datetime:
-            return datetime.strptime(d, "%B %d, %Y")
+    async def _feed_cod(self):
+        url = await self._cod_current_url("modern-warfare-4", "warzone")
+        found = await self._cod_page_latest(url or COD_URL)
+        if found is None:
+            return None
+        url, latest = found
+        slug = url.rstrip("/").rsplit("/", 1)[-1]
+        return [_item(f"cod-{slug}-{latest}",
+                      f"Patch notes updated - {latest}", url)]
 
-        latest = max(dates, key=key)
-        return [_item(f"cod-{latest}", f"Patch notes updated - {latest}",
-                      COD_URL)]
+    async def _feed_warzone(self):
+        url = await self._cod_current_url("warzone")
+        found = await self._cod_page_latest(url or WARZONE_URL)
+        if found is None:
+            return None
+        url, latest = found
+        slug = url.rstrip("/").rsplit("/", 1)[-1]
+        return [_item(f"wz-{slug}-{latest}",
+                      f"Patch notes updated - {latest}", url)]
 
     async def _feed_gta6(self):
         html = await self._get_text(GTA_URL)
@@ -573,6 +618,8 @@ FEEDS = [
      "color": 0xE03A3A, "fetch": "_feed_nba2k27"},
     {"key": "cod-mw4", "name": "COD: Modern Warfare 4", "emoji": "🔫",
      "color": 0x8A9A5B, "fetch": "_feed_cod"},
+    {"key": "cod-warzone", "name": "COD: Warzone", "emoji": "🪂",
+     "color": 0x4C7C9B, "fetch": "_feed_warzone"},
     {"key": "nvidia", "name": "NVIDIA GeForce Drivers", "emoji": "🟢",
      "color": 0x76B900, "fetch": "_feed_nvidia"},
     {"key": "gta6", "name": "GTA VI (PS5)", "emoji": "🌴",
