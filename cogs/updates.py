@@ -2,11 +2,12 @@
 
 Victor's ask (2026-10-31, live deploy session): watch patch notes and
 version drops for the games and platforms the server cares about and
-post them to #game-updates. Feeds (14 - feeds 11-13 added later on
+post them to #game-updates. Feeds (16 - feeds 11-13 added later on
 2026-10-31 at Victor's ask: free game drops "everywhere, not just
 Epic"; those post to #free-games IF that channel exists, else
 #game-updates. Feed 14, COD Warzone, added 2026-11-07 at Victor's
-ask):
+ask. Feeds 15-16 and the iOS filter added 2026-11-10 at Victor's
+ask: device updates for HIS hardware only):
 
   Steam official news (ISteamNews, no key needed):
     - NBA 2K27 (app 4356430)       patch-note posts only
@@ -30,7 +31,19 @@ ask):
     - ONE PIECE Treasure Cruise (iTunes lookup id 943690848)
     - Pokemon Masters EX (iTunes lookup id 1442061397)
     - iOS releases (Apple Developer releases RSS, releases only -
-      no betas, no release candidates)
+      no betas, no release candidates; FILTERED to the current iOS
+      generation only - Victor's iPhone 18 Pro Max cannot install
+      the legacy maintenance branches (iOS 18.x and older) that the
+      RSS also carries for old devices)
+    - Galaxy S23 Ultra firmware (SamMobile archive for SM-S918U /
+      TMB - Samsung's own FOTA version.xml endpoint now 403s from
+      everywhere, verified from the sandbox AND from potofgreed;
+      SamMobile's archive is server-rendered and lists every build
+      with its release date, so the feed takes the newest dated
+      TMB build)
+    - Xiaomi Pad 8 HyperOS (miuidownloader yupei page; only his
+      tablet's own firmware branch - the MIXM global builds,
+      WPZMIXM on Android 16, XPZMIXM on Android 17 - newest wins)
 
 Mechanics:
   - Polls every 3 hours. Seen-state persists as JSON on the bot-data
@@ -97,6 +110,9 @@ STEAM_FREE_URL = ("https://store.steampowered.com/search/results/"
                   "&force_infinite=1&maxprice=free&specials=1"
                   "&infinite=1")
 GOG_URL = "https://www.gog.com/en/"
+SAMSUNG_URL = ("https://www.sammobile.com/samsung/galaxy-s23-ultra/"
+               "firmware/SM-S918U/TMB/")
+XIAOMI_URL = "https://miuidownloader.com/hyperos/yupei"
 
 MONTHS = ("January", "February", "March", "April", "May", "June",
           "July", "August", "September", "October", "November", "December")
@@ -380,13 +396,73 @@ class Updates(commands.Cog):
         items = []
         for node in root.iter("item"):
             title = (node.findtext("title") or "").strip()
-            if not re.match(r"iOS \d", title):
+            m = re.match(r"iOS (\d+)", title)
+            if not m:
                 continue
             if "beta" in title.lower() or "Release Candidate" in title:
                 continue
             link = (node.findtext("link") or "").strip()
-            items.append(_item(node.findtext("guid") or title, title, link))
-        return items
+            items.append((int(m.group(1)),
+                          _item(node.findtext("guid") or title, title,
+                                link)))
+        if not items:
+            return []
+        # Only the current iOS generation can install on Victor's
+        # iPhone 18 Pro Max. The RSS also carries maintenance releases
+        # for old devices (iOS 18.x and older) - those are noise here.
+        # Track the newest major present, floored at the major of the
+        # last item this feed accepted (so the line can only ever move
+        # forward, never back down to a legacy branch), and return
+        # just that line's newest release.
+        majors = [major for major, _ in items]
+        stored = self.state.get("ios", {}).get("label", "")
+        sm = re.match(r"iOS (\d+)", stored)
+        if sm:
+            majors.append(int(sm.group(1)))
+        target = max(majors)
+        current = [it for major, it in items if major == target]
+        if not current:
+            return []  # current line scrolled out of the RSS window
+        return current[:1]
+
+    async def _feed_samsung(self):
+        html = await self._get_text(SAMSUNG_URL)
+        if html is None:
+            return None
+        best = None  # (release date, build)
+        for row in re.findall(r"<tr>(.*?)</tr>", html, re.S):
+            m = re.search(r"/SM-S918U/TMB/download/(S918U[A-Z0-9]+)/",
+                          row)
+            if not m:
+                continue
+            d = re.search(r"(20\d\d-\d\d-\d\d)", row)
+            if not d:
+                continue
+            if best is None or d.group(1) > best[0]:
+                best = (d.group(1), m.group(1))
+        if best is None:
+            log.warning("Samsung archive fetched but no dated TMB "
+                        "builds found")
+            return None
+        when, build = best
+        return [_item(f"sam-{build}", f"Firmware {build}", SAMSUNG_URL,
+                      extra=when)]
+
+    async def _feed_xiaomi_pad8(self):
+        html = await self._get_text(XIAOMI_URL)
+        if html is None:
+            return None
+        best = None  # (version tuple, full version string)
+        for m in re.finditer(r"OS(\d+(?:\.\d+)+)\.([A-Z]PZMIXM)\b",
+                             html):
+            ver = tuple(int(x) for x in m.group(1).split("."))
+            if best is None or ver > best[0]:
+                best = (ver, f"OS{m.group(1)}.{m.group(2)}")
+        if best is None:
+            log.warning("Xiaomi page fetched but no MIXM global build "
+                        "found for yupei")
+            return None
+        return [_item(f"pad8-{best[1]}", best[1], XIAOMI_URL)]
 
     @staticmethod
     def _parse_iso(value):
@@ -636,6 +712,10 @@ FEEDS = [
      "color": 0xF1C40F, "fetch": "_feed_pokemon"},
     {"key": "ios", "name": "iOS Releases", "emoji": "🍎",
      "color": 0xA2AAAD, "fetch": "_feed_ios"},
+    {"key": "samsung-s23u", "name": "Galaxy S23 Ultra Firmware",
+     "emoji": "📱", "color": 0x1428A0, "fetch": "_feed_samsung"},
+    {"key": "xiaomi-pad8", "name": "Xiaomi Pad 8 HyperOS",
+     "emoji": "📲", "color": 0xFF6900, "fetch": "_feed_xiaomi_pad8"},
     {"key": "epic-free", "name": "Epic Free Games", "emoji": "🎁",
      "color": 0x444444, "fetch": "_feed_epic_free", "channel": "free-games"},
     {"key": "steam-free", "name": "Steam Freebies", "emoji": "🎁",
