@@ -7,7 +7,11 @@ post them to #game-updates. Feeds (16 - feeds 11-13 added later on
 Epic"; those post to #free-games IF that channel exists, else
 #game-updates. Feed 14, COD Warzone, added 2026-11-07 at Victor's
 ask. Feeds 15-16 and the iOS filter added 2026-11-10 at Victor's
-ask: device updates for HIS hardware only):
+ask: device updates for HIS hardware only. BLEACH Mirrors High
+added 2026-11-10 at Victor's ask, the same day the NVIDIA feed was
+REMOVED at his ask: NVIDIA's lookup service only ever answered
+workstation / data-center drivers, never a GeForce Game Ready
+driver, so that feed never fired once):
 
   Steam official news (ISteamNews, no key needed):
     - NBA 2K27 (app 4356430)       patch-note posts only
@@ -25,11 +29,9 @@ ask: device updates for HIS hardware only):
                    (Nov 19, 2026 per the page itself), then the same
                    watcher catches the flip to available / new info
   APIs:
-    - NVIDIA Game Ready drivers (AjaxDriverService; posts ONLY when the
-      service returns a GeForce WHQL non-beta driver - anything else is
-      treated as no data, never posted)
     - ONE PIECE Treasure Cruise (iTunes lookup id 943690848)
     - Pokemon Masters EX (iTunes lookup id 1442061397)
+    - BLEACH Mirrors High (iTunes lookup id 6758332966)
     - iOS releases (Apple Developer releases RSS, releases only -
       no betas, no release candidates; FILTERED to the current iOS
       generation only - Victor's iPhone 18 Pro Max cannot install
@@ -64,7 +66,6 @@ import json
 import logging
 import os
 import re
-import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from html import unescape
@@ -96,12 +97,6 @@ WARZONE_URL = ("https://www.callofduty.com/patchnotes/2026/11/"
                "call-of-duty-mw4-warzone-season-1-patch-notes")
 GTA_URL = "https://www.rockstargames.com/VI"
 APPLE_RSS = "https://developer.apple.com/news/releases/rss/releases.rss"
-NVIDIA_URL = (
-    "https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/"
-    "services/AjaxDriverService.php?func=DriverManualLookup&psID=98"
-    "&pfID=623&osID=57&languageCode=1033&beta=0&isWHQL=0&dltype=-1"
-    "&dch=1&upCRD=0&qnf=0&sort1=0&numberOfResults=1"
-)
 EPIC_URL = ("https://store-site-backend-static.ak.epicgames.com/"
             "freeGamesPromotions?locale=en-US&country=US"
             "&allowCountries=US")
@@ -332,35 +327,6 @@ class Updates(commands.Cog):
             label += " - pre-orders open"
         return [_item(f"gta-{release}-{int(preorder)}", label, GTA_URL)]
 
-    async def _feed_nvidia(self):
-        data = await self._get_json(NVIDIA_URL)
-        if not data:
-            return None
-        try:
-            info = data["IDS"][0]["downloadInfo"]
-        except Exception:
-            log.warning("NVIDIA service returned an unexpected shape")
-            return None
-        name = urllib.parse.unquote(info.get("Name", ""))
-        # Only ever post a real GeForce Game Ready WHQL release. The
-        # service sometimes answers with workstation (RTX PRO) drivers
-        # for odd parameter/IP combos - that is treated as NO DATA.
-        if "GeForce" not in name:
-            log.info("NVIDIA check: service answered %r - not a GeForce "
-                     "driver, staying silent", name)
-            return []
-        if info.get("IsWHQL") != "1" or info.get("IsBeta") != "0":
-            return []
-        version = info.get("Version", "").strip()
-        if not version:
-            return None
-        details = urllib.parse.unquote(info.get("DetailsURL", "")) \
-            or "https://www.nvidia.com/en-us/drivers/"
-        when = info.get("ReleaseDateTime", "")
-        return [_item(f"nvidia-{version}",
-                      f"GeForce Game Ready Driver {version}", details,
-                      extra=when)]
-
     async def _itunes_app(self, track_id: int):
         url = f"https://itunes.apple.com/lookup?id={track_id}&country=us"
         data = await self._get_json(url)
@@ -383,6 +349,9 @@ class Updates(commands.Cog):
 
     async def _feed_pokemon(self):
         return await self._itunes_app(1442061397)
+
+    async def _feed_bleach(self):
+        return await self._itunes_app(6758332966)
 
     async def _feed_ios(self):
         xml = await self._get_text(APPLE_RSS)
@@ -696,8 +665,6 @@ FEEDS = [
      "color": 0x8A9A5B, "fetch": "_feed_cod"},
     {"key": "cod-warzone", "name": "COD: Warzone", "emoji": "🪂",
      "color": 0x4C7C9B, "fetch": "_feed_warzone"},
-    {"key": "nvidia", "name": "NVIDIA GeForce Drivers", "emoji": "🟢",
-     "color": 0x76B900, "fetch": "_feed_nvidia"},
     {"key": "gta6", "name": "GTA VI (PS5)", "emoji": "🌴",
      "color": 0xF2A03D, "fetch": "_feed_gta6"},
     {"key": "pbz", "name": "Phantom Blade Zero (Steam)", "emoji": "⚔️",
@@ -710,6 +677,8 @@ FEEDS = [
      "color": 0xC0392B, "fetch": "_feed_optc"},
     {"key": "pokemon-masters", "name": "Pokemon Masters EX", "emoji": "⚡",
      "color": 0xF1C40F, "fetch": "_feed_pokemon"},
+    {"key": "bleach-mirrors-high", "name": "BLEACH Mirrors High",
+     "emoji": "🗡️", "color": 0xE67E22, "fetch": "_feed_bleach"},
     {"key": "ios", "name": "iOS Releases", "emoji": "🍎",
      "color": 0xA2AAAD, "fetch": "_feed_ios"},
     {"key": "samsung-s23u", "name": "Galaxy S23 Ultra Firmware",
