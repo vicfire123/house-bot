@@ -11,6 +11,7 @@ import asyncio
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -52,11 +53,18 @@ class FakeArr:
 SHOW = {"title": "Stranger Things", "year": 2016, "tvdbId": 305288,
         "seasons": [{"seasonNumber": n, "monitored": False} for n in range(0, 5)]}
 MOVIE = {"title": "Dune", "year": 2021, "tmdbId": 438631}
-TV_DEFAULTS = {"qualityProfileId": 4, "rootFolderPath": "/tv", "languageProfileId": None,
-               "tags": [2], "seasonFolder": True, "seriesType": "standard",
-               "monitorNewItems": "all"}
-MOVIE_DEFAULTS = {"qualityProfileId": 6, "rootFolderPath": "/movies",
-                  "minimumAvailability": "released", "tags": []}
+PROFILES = [{"id": 4, "name": "HD-1080p"}, {"id": 5, "name": "Any"},
+            {"id": 6, "name": "Twin"}, {"id": 7, "name": "twin"}]
+FOLDERS = [{"id": 1, "path": "/data/media"}]
+LIBRARY = {"/qualityprofile": PROFILES, "/rootfolder": FOLDERS}
+ENV = {"SONARR_ROOT_FOLDER": "/data/media", "SONARR_QUALITY_PROFILE": "hd-1080p",
+       "RADARR_ROOT_FOLDER": "/data/media/", "RADARR_QUALITY_PROFILE": "Any"}
+
+
+def with_env(**overrides):
+    """Run a test with the media .env values set (and nothing else)."""
+    values = {**ENV, **overrides}
+    return mock.patch.dict(os.environ, values)
 
 
 def ep(id_, season, number, has_file=False, monitored=False, aired=True):
@@ -115,54 +123,56 @@ class Matching(unittest.TestCase):
         self.assertEqual(len(media.close_matches(hits, "dun", None)), 3)
         self.assertEqual(media.close_matches([], "zzqx-not-a-title", None), [])
 
-    def test_seerr_defaults(self):
-        servers = [
-            {"isDefault": True, "is4k": True, "activeDirectory": "/4k"},
-            {"isDefault": True, "is4k": False, "activeProfileId": 4,
-             "activeDirectory": "/tv", "tags": [2], "enableSeasonFolders": True,
-             "seriesType": "standard", "animeSeriesType": "anime",
-             "activeAnimeProfileId": 8, "activeAnimeDirectory": "/anime",
-             "monitorNewItems": "all", "minimumAvailability": "released"},
-        ]
-        server = media.seerr_default_server(servers)
-        self.assertEqual(server["activeDirectory"], "/tv")
-        self.assertEqual(media.tv_defaults(server, anime=False), TV_DEFAULTS)
-        anime = media.tv_defaults(server, anime=True)
-        self.assertEqual((anime["rootFolderPath"], anime["qualityProfileId"],
-                          anime["seriesType"]), ("/anime", 8, "anime"))
-        partial = media.tv_defaults({**server, "activeAnimeProfileId": None}, anime=True)
-        self.assertEqual((partial["rootFolderPath"], partial["qualityProfileId"]),
-                         ("/anime", 4))
-        self.assertEqual(media.movie_defaults(server)["rootFolderPath"], "/tv")
-        self.assertIsNone(media.seerr_default_server([servers[0]]))
-        self.assertIsNone(media.env_defaults("NOT_SET_ANYWHERE"))
+    def test_defaults_resolve_profile_name_to_id(self):
+        arr = FakeArr(LIBRARY)
+        with with_env():
+            self.assertEqual(run(media.load_defaults(arr, "SONARR")),
+                             {"qualityProfileId": 4, "rootFolderPath": "/data/media"})
+            self.assertEqual(run(media.load_defaults(arr, "RADARR")),
+                             {"qualityProfileId": 5, "rootFolderPath": "/data/media"})
+        self.assertEqual(arr.writes(), [])
+
+    def test_defaults_refuse_rather_than_guess(self):
+        arr = FakeArr(LIBRARY)
+        bad = ({"SONARR_QUALITY_PROFILE": ""}, {"SONARR_ROOT_FOLDER": ""},
+               {"SONARR_QUALITY_PROFILE": "No Such Profile"},
+               {"SONARR_QUALITY_PROFILE": "Twin"},      # two profiles match
+               {"SONARR_QUALITY_PROFILE": "HD"},        # no partial matches
+               {"SONARR_ROOT_FOLDER": "/data"})         # not a root folder
+        for override in bad:
+            with with_env(**override), self.assertRaises(media.ArrError) as caught:
+                run(media.load_defaults(arr, "SONARR"))
+            self.assertIn("Can't add it", str(caught.exception))
 
 
 class NewShow(unittest.TestCase):
     def test_whole_show(self):
-        arr = FakeArr()
-        reply = run(media.request_tv(arr, SHOW, MediaRequest("x"), TV_DEFAULTS))
+        arr = FakeArr(LIBRARY)
+        with with_env():
+            reply = run(media.request_tv(arr, SHOW, MediaRequest("x")))
         (_, path, body), = arr.writes()
         self.assertEqual(path, "/series")
         self.assertEqual([s["monitored"] for s in body["seasons"]],
                          [False, True, True, True, True])  # specials stay off
         self.assertTrue(body["addOptions"]["searchForMissingEpisodes"])
         self.assertEqual((body["rootFolderPath"], body["qualityProfileId"], body["tags"]),
-                         ("/tv", 4, [2]))
+                         ("/data/media", 4, []))
         self.assertIn("all seasons monitored", reply)
 
     def test_one_season(self):
-        arr = FakeArr()
-        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=1), TV_DEFAULTS))
+        arr = FakeArr(LIBRARY)
+        with with_env():
+            reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=1)))
         (_, _, body), = arr.writes()
         self.assertEqual([s["seasonNumber"] for s in body["seasons"] if s["monitored"]], [1])
         self.assertTrue(body["addOptions"]["searchForMissingEpisodes"])
         self.assertIn("only season 1 monitored", reply)
 
     def test_one_episode(self):
-        arr = FakeArr({"/episode": episodes([ep(31, 3, 3), ep(32, 3, 4)])})
-        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4),
-                                     TV_DEFAULTS, tries=2, delay=0))
+        arr = FakeArr({**LIBRARY, "/episode": episodes([ep(31, 3, 3), ep(32, 3, 4)])})
+        with with_env():
+            reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4),
+                                         tries=2, delay=0))
         add, command = arr.writes()
         self.assertFalse(any(s["monitored"] for s in add[2]["seasons"]))
         self.assertFalse(add[2]["addOptions"]["searchForMissingEpisodes"])
@@ -171,17 +181,20 @@ class NewShow(unittest.TestCase):
         self.assertIn("S03E04", reply)
 
     def test_episode_list_never_arrives(self):
-        arr = FakeArr()
-        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4),
-                                     TV_DEFAULTS, tries=2, delay=0))
+        arr = FakeArr(LIBRARY)
+        with with_env():
+            reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4),
+                                         tries=2, delay=0))
         self.assertEqual(arr.commands(), [])
         self.assertIn("again in a minute", reply)
 
     def test_refuses_without_defaults_or_season(self):
-        arr = FakeArr()
-        self.assertEqual(run(media.request_tv(arr, SHOW, MediaRequest("x"), None)),
-                         media.NO_DEFAULTS)
-        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=9), TV_DEFAULTS))
+        arr = FakeArr(LIBRARY)
+        with with_env(SONARR_QUALITY_PROFILE="No Such Profile"), \
+                self.assertRaises(media.ArrError):
+            run(media.request_tv(arr, SHOW, MediaRequest("x")))
+        with with_env():
+            reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=9)))
         self.assertIn("no season 9", reply)
         self.assertEqual(arr.writes(), [])
 
@@ -190,7 +203,7 @@ class ExistingShow(unittest.TestCase):
     def test_season_adds_monitoring_without_touching_others(self):
         arr = FakeArr({"/series": in_library(monitored_seasons=(2,)),
                        "/episode": episodes([ep(11, 1, 1), ep(12, 1, 2, has_file=True)])})
-        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=1), None))
+        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=1)))
         put, monitor, command = arr.writes()
         self.assertEqual(put[1], "/series/9")
         self.assertEqual([s["seasonNumber"] for s in put[2]["seasons"] if s["monitored"]],
@@ -203,7 +216,7 @@ class ExistingShow(unittest.TestCase):
     def test_whole_show_search(self):
         arr = FakeArr({"/series": in_library(),
                        "/episode": episodes([ep(1, 0, 1), ep(11, 1, 1), ep(21, 2, 1)])})
-        run(media.request_tv(arr, SHOW, MediaRequest("x"), None))
+        run(media.request_tv(arr, SHOW, MediaRequest("x")))
         put, monitor, command = arr.writes()
         self.assertEqual([s["monitored"] for s in put[2]["seasons"]],
                          [False, True, True, True, True])
@@ -216,42 +229,46 @@ class ExistingShow(unittest.TestCase):
         for req in (MediaRequest("x"), MediaRequest("x", season=1),
                     MediaRequest("x", season=1, episode=2)):
             arr = FakeArr({"/series": in_library(), "/episode": episodes(eps)})
-            reply = run(media.request_tv(arr, SHOW, req, None))
+            reply = run(media.request_tv(arr, SHOW, req))
             self.assertIn("Already have", reply)
             self.assertEqual(arr.writes(), [])
 
     def test_single_episode_and_missing_episode(self):
         arr = FakeArr({"/series": in_library(), "/episode": episodes([ep(34, 3, 4)])})
-        run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4), None))
+        run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4)))
         self.assertEqual(arr.commands(), [{"name": "EpisodeSearch", "episodeIds": [34]}])
         self.assertIn(("PUT", "/episode/monitor", {"episodeIds": [34], "monitored": True}),
                       arr.writes())
         self.assertFalse(any(p.startswith("/series") for _, p, _ in arr.writes()))
         arr = FakeArr({"/series": in_library(), "/episode": episodes([ep(34, 3, 4)])})
-        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=99), None))
+        reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=99)))
         self.assertIn("no S03E99", reply)
         self.assertEqual(arr.writes(), [])
 
 
 class Movies(unittest.TestCase):
     def test_new_movie(self):
-        arr = FakeArr()
-        reply = run(media.request_movie(arr, MOVIE, MOVIE_DEFAULTS))
+        arr = FakeArr(LIBRARY)
+        with with_env():
+            reply = run(media.request_movie(arr, MOVIE))
         (_, path, body), = arr.writes()
         self.assertEqual(path, "/movie")
         self.assertEqual((body["tmdbId"], body["rootFolderPath"], body["qualityProfileId"],
                           body["monitored"], body["addOptions"]),
-                         (438631, "/movies", 6, True, {"searchForMovie": True}))
+                         (438631, "/data/media", 5, True, {"searchForMovie": True}))
         self.assertIn("Added", reply)
-        self.assertEqual(run(media.request_movie(FakeArr(), MOVIE, None)), media.NO_DEFAULTS)
+        refused = FakeArr(LIBRARY)
+        with with_env(RADARR_ROOT_FOLDER=""), self.assertRaises(media.ArrError):
+            run(media.request_movie(refused, MOVIE))
+        self.assertEqual(refused.writes(), [])
 
     def test_existing_movie(self):
         have = FakeArr({"/movie": [{**MOVIE, "id": 5, "hasFile": True, "monitored": True}]})
-        self.assertIn("Already have", run(media.request_movie(have, MOVIE, None)))
+        self.assertIn("Already have", run(media.request_movie(have, MOVIE)))
         self.assertEqual(have.writes(), [])
         missing = FakeArr({"/movie": [{**MOVIE, "id": 5, "hasFile": False,
                                        "monitored": False}]})
-        run(media.request_movie(missing, MOVIE, None))
+        run(media.request_movie(missing, MOVIE))
         put, command = missing.writes()
         self.assertTrue(put[2]["monitored"])
         self.assertEqual(command[2], {"name": "MoviesSearch", "movieIds": [5]})
@@ -259,7 +276,7 @@ class Movies(unittest.TestCase):
     def test_unreachable_surfaces_as_arr_error(self):
         down = FakeArr(fail="Radarr is unreachable from potofgreed.")
         with self.assertRaises(media.ArrError):
-            run(media.request_movie(down, MOVIE, MOVIE_DEFAULTS))
+            run(media.request_movie(down, MOVIE))
 
 
 class FakeCtx:
@@ -297,20 +314,17 @@ class Command(unittest.TestCase):
                 self.audits.append(text)
             cog.audit = audit
             self.sonarr = FakeArr({"/series/lookup": list(sonarr_hits),
-                                   "/episode": episodes([ep(34, 3, 4)])}, fail=fail)
-            self.radarr = FakeArr({"/movie/lookup": list(radarr_hits)})
+                                   "/episode": episodes([ep(34, 3, 4)]), **LIBRARY}, fail=fail)
+            self.radarr = FakeArr({"/movie/lookup": list(radarr_hits), **LIBRARY})
             self.asked = []
 
-            async def service(name):
+            def service(name):
                 self.asked.append(name)
-                if name == "Sonarr":
-                    return self.sonarr, {"isDefault": True, "activeProfileId": 4,
-                                         "activeDirectory": "/tv"}
-                return self.radarr, {"isDefault": True, "activeProfileId": 6,
-                                     "activeDirectory": "/movies"}
+                return self.sonarr if name == "Sonarr" else self.radarr
             cog._service = service
             ctx = FakeCtx(author)
-            await media.Media.request.callback(cog, ctx, query=query)
+            with with_env():
+                await media.Media.request.callback(cog, ctx, query=query)
             return ctx.replies
         return run(go())
 

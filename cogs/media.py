@@ -13,17 +13,16 @@ closely the bot asks which one instead of guessing.
 Who: only user IDs in ADMIN_USER_IDS, silent to everyone else - the
 same whitelist the admin module uses.
 
-Defaults: new titles are added with the root folder / quality profile
-/ tags of Seerr's default (non-4K) Sonarr and Radarr servers, read
-live from Seerr's API, so a bot request lands exactly where a Seerr
-request does (anime is spotted by Sonarr's "Anime" genre where Seerr
-uses a TMDB keyword; Seerr override rules are not applied). Without Seerr, explicit *_ROOT_FOLDER and
-*_QUALITY_PROFILE_ID values in .env are used. If neither is set the
-bot refuses to add - it never guesses a folder or profile, and it
-never changes a Sonarr/Radarr setting.
+Defaults: new titles are added with the root folder and quality
+profile named in .env (SONARR_ROOT_FOLDER / SONARR_QUALITY_PROFILE and
+the RADARR_ pair). The profile NAME is resolved to its ID through the
+*arr API on each add. If a value is missing, the name does not match
+exactly one profile, or the folder is not one of the *arr's root
+folders, the bot refuses to add - it never guesses a folder or
+profile, and it never changes a Sonarr/Radarr setting.
 
-Keys live in .env (SONARR_API_KEY / RADARR_API_KEY / SEERR_API_KEY),
-are sent only in the X-Api-Key header and never appear in replies.
+Keys live in .env (SONARR_API_KEY / RADARR_API_KEY), are sent only in
+the X-Api-Key header and never appear in replies.
 """
 
 import asyncio
@@ -115,66 +114,40 @@ def label(kind: str, item: dict) -> str:
            f"{' - TV' if kind == 'tv' else ' - movie'}"
 
 
-# ---------------- defaults (Seerr's, never invented) ----------------
+# ---------------- defaults (from .env, never invented) ----------------
 
-def seerr_default_server(servers: list) -> Optional[dict]:
-    """The server Seerr sends ordinary (non-4K) requests to."""
-    for s in servers or []:
-        if s.get("isDefault") and not s.get("is4k"):
-            return s
-    return None
-
-
-def tv_defaults(server: dict, anime: bool) -> dict:
-    """Same picks Seerr makes: for anime each anime setting that is
-    filled in wins over the standard one, field by field."""
-    def pick(field: str):
-        return (anime and server.get(f"activeAnime{field}")) or server.get(f"active{field}")
-    return {
-        "qualityProfileId": pick("ProfileId"),
-        "rootFolderPath": pick("Directory"),
-        "languageProfileId": pick("LanguageProfileId"),
-        "tags": list(server.get("animeTags" if anime else "tags") or []),
-        "seasonFolder": server.get("enableSeasonFolders", True),
-        "seriesType": server.get("animeSeriesType" if anime else "seriesType") or "standard",
-        "monitorNewItems": server.get("monitorNewItems") or "all",
-    }
-
-
-def movie_defaults(server: dict) -> dict:
-    return {
-        "qualityProfileId": server.get("activeProfileId"),
-        "rootFolderPath": server.get("activeDirectory"),
-        "minimumAvailability": server.get("minimumAvailability") or "released",
-        "tags": list(server.get("tags") or []),
-    }
-
-
-def env_defaults(prefix: str) -> Optional[dict]:
-    """Explicit .env fallback for a setup without Seerr."""
+async def load_defaults(arr, prefix: str) -> dict:
+    """Root folder + quality profile ID for a new title, from the
+    explicit .env values. Raises ArrError (a refusal) rather than guess."""
     root = os.environ.get(f"{prefix}_ROOT_FOLDER", "").strip()
-    profile = os.environ.get(f"{prefix}_QUALITY_PROFILE_ID", "").strip()
-    if not root or not profile.isdigit():
-        return None
-    return {"qualityProfileId": int(profile), "rootFolderPath": root,
-            "languageProfileId": None, "tags": [], "seasonFolder": True,
-            "seriesType": "standard", "monitorNewItems": "all",
-            "minimumAvailability": "released"}
-
-
-NO_DEFAULTS = ("Can't add it: no root folder / quality profile to use. "
-               "Set SEERR_API_KEY in .env (or the explicit *_ROOT_FOLDER "
-               "and *_QUALITY_PROFILE_ID values) and restart me.")
+    wanted = os.environ.get(f"{prefix}_QUALITY_PROFILE", "").strip()
+    if not root or not wanted:
+        raise ArrError(f"Can't add it: set {prefix}_ROOT_FOLDER and "
+                       f"{prefix}_QUALITY_PROFILE in .env and restart me.")
+    profiles = await arr.call("GET", "/qualityprofile")
+    ids = [p["id"] for p in profiles or []
+           if str(p.get("name", "")).strip().lower() == wanted.lower()]
+    if len(ids) != 1:
+        raise ArrError(f"Can't add it: {prefix}_QUALITY_PROFILE '{wanted}' matches "
+                       f"{len(ids)} quality profiles in {arr.name} - it has to "
+                       "match exactly one.")
+    folders = await arr.call("GET", "/rootfolder")
+    paths = [f.get("path", "") for f in folders or []
+             if f.get("path", "").rstrip("/\\") == root.rstrip("/\\")]
+    if len(paths) != 1:
+        raise ArrError(f"Can't add it: {prefix}_ROOT_FOLDER '{root}' is not a "
+                       f"root folder in {arr.name}.")
+    return {"qualityProfileId": ids[0], "rootFolderPath": paths[0]}
 
 
 # ---------------- *arr client ----------------
 
 class Arr:
-    """Tiny JSON client for Sonarr / Radarr (v3 API) and Seerr (v1)."""
+    """Tiny JSON client for Sonarr / Radarr (v3 API)."""
 
-    def __init__(self, name: str, url: str, key: str, api: str = "/api/v3"):
+    def __init__(self, name: str, url: str, key: str):
         self.name = name
-        self.base = url.rstrip("/") + api
+        self.base = url.rstrip("/") + "/api/v3"
         self.key = key
 
     async def call(self, method: str, path: str, params: Optional[dict] = None,
@@ -267,8 +240,7 @@ async def _search_episode(sonarr: Arr, series_id: int, req: MediaRequest,
 
 
 async def request_tv(sonarr: Arr, series: dict, req: MediaRequest,
-                     defaults: Optional[dict], tries: int = 10,
-                     delay: float = 3.0) -> str:
+                     tries: int = 10, delay: float = 3.0) -> str:
     """Do one TV request against Sonarr; returns the reply line."""
     name = f"{series.get('title', '?')} ({series.get('year') or '?'})"
     numbers = [s["seasonNumber"] for s in series.get("seasons", [])]
@@ -281,21 +253,19 @@ async def request_tv(sonarr: Arr, series: dict, req: MediaRequest,
 
     # ---- not in Sonarr yet: add it ----
     if existing is None:
-        if not defaults or not defaults.get("rootFolderPath") \
-                or not defaults.get("qualityProfileId"):
-            return NO_DEFAULTS
+        defaults = await load_defaults(sonarr, "SONARR")
         whole, one_episode = req.season is None, req.episode is not None
         payload = {
             "tvdbId": tvdb,
             "title": series.get("title"),
             "qualityProfileId": defaults["qualityProfileId"],
             "rootFolderPath": defaults["rootFolderPath"],
-            "seasonFolder": defaults["seasonFolder"],
-            "seriesType": defaults["seriesType"],
-            "tags": defaults["tags"],
+            "seasonFolder": True,
+            "seriesType": "standard",
+            "tags": [],
             "monitored": True,
             # One-episode request: later seasons must not auto-monitor.
-            "monitorNewItems": "none" if one_episode else defaults["monitorNewItems"],
+            "monitorNewItems": "none" if one_episode else "all",
             "seasons": [{"seasonNumber": n,
                          "monitored": not one_episode and n > 0
                          and (whole or n == req.season)} for n in numbers],
@@ -306,8 +276,6 @@ async def request_tv(sonarr: Arr, series: dict, req: MediaRequest,
         }
         if one_episode:
             payload["addOptions"]["monitor"] = "none"
-        if defaults.get("languageProfileId"):
-            payload["languageProfileId"] = defaults["languageProfileId"]
         created = await sonarr.call("POST", "/series", json=payload)
         if not (created or {}).get("id"):
             return f"Sonarr did not accept **{name}**."
@@ -356,7 +324,7 @@ async def request_tv(sonarr: Arr, series: dict, req: MediaRequest,
 
 # ---------------- movies (Radarr) ----------------
 
-async def request_movie(radarr: Arr, movie: dict, defaults: Optional[dict]) -> str:
+async def request_movie(radarr: Arr, movie: dict) -> str:
     """Do one movie request against Radarr; returns the reply line."""
     name = f"{movie.get('title', '?')} ({movie.get('year') or '?'})"
     tmdb = movie["tmdbId"]
@@ -372,9 +340,7 @@ async def request_movie(radarr: Arr, movie: dict, defaults: Optional[dict]) -> s
         await _search(radarr, "MoviesSearch", movieIds=[existing["id"]])
         return f"**{name}** is already in Radarr - monitored, searching."
 
-    if not defaults or not defaults.get("rootFolderPath") \
-            or not defaults.get("qualityProfileId"):
-        return NO_DEFAULTS
+    defaults = await load_defaults(radarr, "RADARR")
     created = await radarr.call("POST", "/movie", json={
         "tmdbId": tmdb,
         "title": movie.get("title"),
@@ -382,8 +348,8 @@ async def request_movie(radarr: Arr, movie: dict, defaults: Optional[dict]) -> s
         "titleSlug": str(tmdb),
         "qualityProfileId": defaults["qualityProfileId"],
         "rootFolderPath": defaults["rootFolderPath"],
-        "minimumAvailability": defaults["minimumAvailability"],
-        "tags": defaults["tags"],
+        "minimumAvailability": "released",
+        "tags": [],
         "monitored": True,
         "addOptions": {"searchForMovie": True},
     })
@@ -448,32 +414,17 @@ class Media(commands.Cog):
         self.urls = {"Sonarr": env("SONARR_URL", "http://192.168.1.92:8989"),
                      "Radarr": env("RADARR_URL", "http://192.168.1.92:7878")}
         self.keys = {"Sonarr": env("SONARR_API_KEY"), "Radarr": env("RADARR_API_KEY")}
-        seerr_key = env("SEERR_API_KEY")
-        self.seerr = Arr("Seerr", env("SEERR_URL", "http://192.168.1.92:5055"),
-                         seerr_key, api="/api/v1") if seerr_key else None
 
-    async def _service(self, name: str):
-        """(client or None, Seerr's default server settings or None).
-
-        Seerr's server entry carries both the defaults and the API key
-        Seerr itself uses, so SEERR_API_KEY alone is enough; an explicit
-        SONARR_API_KEY / RADARR_API_KEY in .env wins."""
-        server = None
-        if self.seerr is not None:
-            server = seerr_default_server(
-                await self.seerr.call("GET", f"/settings/{name.lower()}"))
-        key = self.keys[name] or (server or {}).get("apiKey", "")
-        return (Arr(name, self.urls[name], key) if key else None), server
+    def _service(self, name: str) -> Optional[Arr]:
+        key = self.keys[name]
+        return Arr(name, self.urls[name], key) if key else None
 
     async def _fulfil(self, kind: str, item: dict, req: MediaRequest,
-                      sonarr, s_server, radarr, r_server) -> str:
+                      sonarr, radarr) -> str:
         try:
             if kind == "tv":
-                anime = "anime" in [g.lower() for g in item.get("genres") or []]
-                defaults = tv_defaults(s_server, anime) if s_server else env_defaults("SONARR")
-                return await request_tv(sonarr, item, req, defaults)
-            defaults = movie_defaults(r_server) if r_server else env_defaults("RADARR")
-            return await request_movie(radarr, item, defaults)
+                return await request_tv(sonarr, item, req)
+            return await request_movie(radarr, item)
         except ArrError as e:
             return str(e)
         except Exception:
@@ -494,12 +445,12 @@ class Media(commands.Cog):
         tv_only = req.season is not None
         try:
             async with ctx.typing():
-                sonarr, s_server = await self._service("Sonarr")
-                radarr, r_server = (None, None) if tv_only else await self._service("Radarr")
+                sonarr = self._service("Sonarr")
+                radarr = None if tv_only else self._service("Radarr")
                 if sonarr is None and radarr is None:
                     await ctx.reply("No Sonarr/Radarr API key configured - set "
-                                    "SEERR_API_KEY (or SONARR_API_KEY / "
-                                    "RADARR_API_KEY) in .env and restart me.")
+                                    "SONARR_API_KEY / RADARR_API_KEY in .env "
+                                    "and restart me.")
                     return
                 choices = []
                 if sonarr is not None:
@@ -517,7 +468,7 @@ class Media(commands.Cog):
             return
 
         async def run(kind: str, item: dict) -> str:
-            result = await self._fulfil(kind, item, req, sonarr, s_server, radarr, r_server)
+            result = await self._fulfil(kind, item, req, sonarr, radarr)
             await self.audit(ctx.guild, f"REQUEST by {ctx.author}: `{query}` -> {result}")
             return result
 

@@ -127,6 +127,10 @@ Media requests (whitelisted admins only, silent to everyone else):
 - A season/episode means TV (Sonarr); a bare title is looked up in both
   Sonarr and Radarr. Several close matches = the bot asks which one.
   Already downloaded = it says so and does nothing.
-- Setup: put SEERR_API_KEY in .env (see .env.example). New titles use
-  the root folder / quality profile of Seerr's default servers; the bot
-  never changes a Sonarr/Radarr setting.
+- Setup, in .env (see .env.example): SONARR_API_KEY / RADARR_API_KEY,
+  SONARR_ROOT_FOLDER / RADARR_ROOT_FOLDER (folder paths as shown in
+  Sonarr / Radarr) and SONARR_QUALITY_PROFILE / RADARR_QUALITY_PROFILE
+  (profile names as shown there). The bot resolves the profile name to
+  its ID on each add and refuses to add if the name does not match
+  exactly one profile or the folder is not a root folder. It never
+  changes a Sonarr/Radarr setting.
