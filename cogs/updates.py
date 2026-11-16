@@ -191,6 +191,21 @@ class Updates(commands.Cog):
             with open(DATA_FILE, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
+                # Prune orphan keys (e.g. "nvidia" - feed removed Nov
+                # 10): no feed reads them, and leaving them makes the
+                # file lie about what is tracked. A feed's ":seen" set
+                # (free-game feeds) is a real key and survives.
+                known = {f["key"] for f in FEEDS}
+                known |= {k + ":seen" for k in known}
+                orphans = [k for k in data if k not in known]
+                if orphans:
+                    for k in orphans:
+                        del data[k]
+                    log.info("updates state: pruned orphan keys %s", orphans)
+                    tmp = DATA_FILE + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as out:
+                        json.dump(data, out, indent=1, sort_keys=True)
+                    os.replace(tmp, DATA_FILE)
                 log.info("updates state loaded: %d feeds seeded", len(data))
                 return data
         except FileNotFoundError:
