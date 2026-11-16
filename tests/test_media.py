@@ -130,6 +130,9 @@ class Matching(unittest.TestCase):
         anime = media.tv_defaults(server, anime=True)
         self.assertEqual((anime["rootFolderPath"], anime["qualityProfileId"],
                           anime["seriesType"]), ("/anime", 8, "anime"))
+        partial = media.tv_defaults({**server, "activeAnimeProfileId": None}, anime=True)
+        self.assertEqual((partial["rootFolderPath"], partial["qualityProfileId"]),
+                         ("/anime", 4))
         self.assertEqual(media.movie_defaults(server)["rootFolderPath"], "/tv")
         self.assertIsNone(media.seerr_default_server([servers[0]]))
         self.assertIsNone(media.env_defaults("NOT_SET_ANYWHERE"))
@@ -160,11 +163,10 @@ class NewShow(unittest.TestCase):
         arr = FakeArr({"/episode": episodes([ep(31, 3, 3), ep(32, 3, 4)])})
         reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4),
                                      TV_DEFAULTS, tries=2, delay=0))
-        add, monitor, command = arr.writes()
+        add, command = arr.writes()
         self.assertFalse(any(s["monitored"] for s in add[2]["seasons"]))
         self.assertFalse(add[2]["addOptions"]["searchForMissingEpisodes"])
         self.assertEqual(add[2]["monitorNewItems"], "none")
-        self.assertEqual(monitor[2], {"episodeIds": [32], "monitored": True})
         self.assertEqual(command[2], {"name": "EpisodeSearch", "episodeIds": [32]})
         self.assertIn("S03E04", reply)
 
@@ -222,6 +224,8 @@ class ExistingShow(unittest.TestCase):
         arr = FakeArr({"/series": in_library(), "/episode": episodes([ep(34, 3, 4)])})
         run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=4), None))
         self.assertEqual(arr.commands(), [{"name": "EpisodeSearch", "episodeIds": [34]}])
+        self.assertIn(("PUT", "/episode/monitor", {"episodeIds": [34], "monitored": True}),
+                      arr.writes())
         self.assertFalse(any(p.startswith("/series") for _, p, _ in arr.writes()))
         arr = FakeArr({"/series": in_library(), "/episode": episodes([ep(34, 3, 4)])})
         reply = run(media.request_tv(arr, SHOW, MediaRequest("x", season=3, episode=99), None))

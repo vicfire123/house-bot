@@ -16,7 +16,8 @@ same whitelist the admin module uses.
 Defaults: new titles are added with the root folder / quality profile
 / tags of Seerr's default (non-4K) Sonarr and Radarr servers, read
 live from Seerr's API, so a bot request lands exactly where a Seerr
-request does. Without Seerr, explicit *_ROOT_FOLDER and
+request does (anime is spotted by Sonarr's "Anime" genre where Seerr
+uses a TMDB keyword; Seerr override rules are not applied). Without Seerr, explicit *_ROOT_FOLDER and
 *_QUALITY_PROFILE_ID values in .env are used. If neither is set the
 bot refuses to add - it never guesses a folder or profile, and it
 never changes a Sonarr/Radarr setting.
@@ -125,16 +126,15 @@ def seerr_default_server(servers: list) -> Optional[dict]:
 
 
 def tv_defaults(server: dict, anime: bool) -> dict:
-    """Same choice Seerr makes: the anime profile/folder when the show
-    is anime and both are configured, else the standard ones."""
-    use_anime = bool(anime and server.get("activeAnimeProfileId")
-                     and server.get("activeAnimeDirectory"))
-    pre = "activeAnime" if use_anime else "active"
+    """Same picks Seerr makes: for anime each anime setting that is
+    filled in wins over the standard one, field by field."""
+    def pick(field: str):
+        return (anime and server.get(f"activeAnime{field}")) or server.get(f"active{field}")
     return {
-        "qualityProfileId": server.get(f"{pre}ProfileId"),
-        "rootFolderPath": server.get(f"{pre}Directory"),
-        "languageProfileId": server.get(f"{pre}LanguageProfileId"),
-        "tags": list(server.get("animeTags" if use_anime else "tags") or []),
+        "qualityProfileId": pick("ProfileId"),
+        "rootFolderPath": pick("Directory"),
+        "languageProfileId": pick("LanguageProfileId"),
+        "tags": list(server.get("animeTags" if anime else "tags") or []),
         "seasonFolder": server.get("enableSeasonFolders", True),
         "seriesType": server.get("animeSeriesType" if anime else "seriesType") or "standard",
         "monitorNewItems": server.get("monitorNewItems") or "all",
@@ -192,6 +192,9 @@ class Arr:
                         raise ArrError(f"{self.name} refused that "
                                        f"(HTTP {resp.status}): {body}")
                     return await resp.json(content_type=None)
+        except ValueError:
+            raise ArrError(f"{self.name} sent back something that isn't JSON - "
+                           "check its URL in .env.")
         except (aiohttp.ClientError, asyncio.TimeoutError):
             log.warning("%s call failed: %s %s", self.name, method, path, exc_info=True)
             raise ArrError(f"{self.name} is unreachable from potofgreed.")
@@ -227,6 +230,7 @@ async def _find_episode(sonarr: Arr, series_id: int, season: int, episode: int,
     for attempt in range(tries):
         eps = await sonarr.call("GET", "/episode",
                                 params={"seriesId": series_id, "seasonNumber": season})
+        eps = [e for e in eps if e.get("seasonNumber") == season]
         for ep in eps:
             if ep.get("episodeNumber") == episode:
                 return ep, True
@@ -249,9 +253,17 @@ async def _search_episode(sonarr: Arr, series_id: int, req: MediaRequest,
                 f"the same request again in a minute to search {code}.")
     if ep.get("hasFile"):
         return f"Already have **{name}** {code} - nothing to do."
+    if added:
+        # Sonarr re-applies "monitor nothing" once its first scan of a
+        # new series finishes, which would undo a monitor flag set now.
+        # A search sent through the API is a manual search, and those
+        # grab unmonitored episodes, so the search alone does the job.
+        await _search(sonarr, "EpisodeSearch", episodeIds=[ep["id"]])
+        return (f"{prefix}Searching {code} once - only that episode. It is "
+                f"not monitored, so ask again if nothing turns up.")
     await _monitor_episodes(sonarr, [ep])
     await _search(sonarr, "EpisodeSearch", episodeIds=[ep["id"]])
-    return f"{prefix}Searching **{name}** {code} - only that episode."
+    return f"Searching **{name}** {code} - only that episode (now monitored)."
 
 
 async def request_tv(sonarr: Arr, series: dict, req: MediaRequest,
@@ -316,7 +328,8 @@ async def request_tv(sonarr: Arr, series: dict, req: MediaRequest,
     if req.season is not None:
         params["seasonNumber"] = req.season
     episodes = [e for e in await sonarr.call("GET", "/episode", params=params)
-                if e.get("seasonNumber", 0) > 0 or req.season == 0]
+                if (e.get("seasonNumber") == req.season if req.season is not None
+                    else e.get("seasonNumber", 0) > 0)]
     aired = [e for e in episodes if _aired(e)]
     what = f"season {req.season}" if req.season is not None else "every season"
     if aired and all(e.get("hasFile") for e in aired):
@@ -497,6 +510,10 @@ class Media(commands.Cog):
                     choices += [("movie", h) for h in close_matches(hits, req.title, req.year)]
         except ArrError as e:
             await ctx.reply(str(e))
+            return
+        except Exception:
+            log.exception("media lookup failed")
+            await ctx.reply("That lookup hit an unexpected error - check my log.")
             return
 
         async def run(kind: str, item: dict) -> str:
