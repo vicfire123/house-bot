@@ -8,9 +8,12 @@ Spec (locked 2026-10-31, Victor's calls):
     the bot has Manage Channels).
   - Removing the last star deletes the starboard post; extra stars
     just update the count on the existing post, never a duplicate.
-  - Stars count in EVERY channel, #vicbot-logs included (Victor
-    reversed the original audit-channel exclusion on 2026-10-31,
-    during the live deploy tests).
+  - Stars count in every channel @everyone can READ, #vicbot-logs
+    included (Victor reversed the original audit-channel exclusion
+    on 2026-10-31, during the live deploy tests). A star in a PRIVATE
+    channel never reposts to the public board (fixed 2026-11-16:
+    the old code reposted private messages with a jump link anyone
+    on the board could follow).
   - Reactions inside #starboard itself are ignored (no loops).
 
 The message-id -> starboard-post-id map is kept in a JSON file so a
@@ -155,9 +158,24 @@ class Starboard(commands.Cog):
                 return
             if message.author.bot:
                 return
-            count = self._star_count(message)
             key = str(message_id)
             post_id = self.map.get(key)
+            if not channel.permissions_for(
+                    guild.default_role).read_messages:
+                # Private channel: its messages must never appear on
+                # the public board. Remove any post that predates this
+                # check, then stop. (Threads inherit the parent's
+                # permissions, so this covers them too.)
+                if post_id is not None:
+                    try:
+                        post = await board.fetch_message(post_id)
+                        await post.delete()
+                    except Exception:
+                        pass
+                    del self.map[key]
+                    self._save()
+                return
+            count = self._star_count(message)
 
             if count <= 0:
                 if post_id is not None:

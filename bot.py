@@ -11,8 +11,9 @@ Modules:
   - watch:     potofgreed service health checks every 2 minutes -
                DOWN / back-up alerts in the log channel, plus !status.
   - starboard: 1 ⭐ on any human message reposts it to #starboard.
-  - updates:   patch / version tracker for 10 feeds (games, NVIDIA
-               drivers, iOS), posting to #game-updates every 3 hours.
+  - updates:   patch / version tracker for 16 feeds (games, devices,
+               iOS, free games), posting to #game-updates every 3 hours,
+               with per-feed health alerts in the audit channel.
 
 (cogs/soundboard.py still exists in the repo but is NOT loaded -
 Victor killed !sfx on 2026-10-31 after seeing the native Discord
@@ -74,20 +75,27 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
 
 async def audit(guild: discord.Guild | None, text: str) -> None:
-    """Write one line to the audit channel (if configured) and the log."""
+    """Write one line to the audit channel (if configured) and the log.
+
+    Alerts must never vanish silently: a missing channel id or a
+    failed send is a warning in the log, so a dead audit channel is
+    visible instead of swallowing the alarm it was meant to carry."""
     log.info("AUDIT: %s", text)
     if AUDIT_CHANNEL_ID is None:
+        log.warning("AUDIT channel not configured - alert only in log")
         return
     channel = bot.get_channel(AUDIT_CHANNEL_ID)
     if channel is None:
         try:
             channel = await bot.fetch_channel(AUDIT_CHANNEL_ID)
         except Exception:
+            log.warning("AUDIT channel %s unreachable - alert only in log",
+                        AUDIT_CHANNEL_ID)
             return
     try:
         await channel.send(text[:1900])
     except Exception:
-        pass
+        log.warning("AUDIT send failed - alert only in log", exc_info=True)
 
 
 @bot.event
@@ -95,6 +103,9 @@ async def on_ready():
     log.info("Logged in as %s (id %s)", bot.user, bot.user.id if bot.user else "?")
     log.info("discord.py version: %s", discord.__version__)
     log.info("Admin whitelist: %s", sorted(ADMIN_USER_IDS) or "EMPTY - admin module disabled")
+    if AUDIT_CHANNEL_ID is None:
+        log.warning("AUDIT_CHANNEL_ID is not set - watch/tracker alerts "
+                    "will only appear in the container log")
 
 
 @bot.event
@@ -120,7 +131,7 @@ async def help_cmd(ctx: commands.Context):
         "pause / skip / stop / queue buttons posts with each track\n"
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
         f"`{PREFIX}panel` re-drop the music player panel at the bottom of the channel\n"
-        f"`{PREFIX}updates` last known patch / version for every tracked game, NVIDIA drivers and iOS, plus free game drops from Epic, Steam and GOG (posts land in #game-updates)\n"
+        f"`{PREFIX}updates` last known patch / version for every tracked game, device and iOS, plus free game drops from Epic, Steam and GOG (posts land in #game-updates)\n"
         "Star a message with ⭐ and it lands in #starboard\n"
         f"`{PREFIX}mc` Minecraft server status\n"
         f"`{PREFIX}status` potofgreed service health (dashboard, Jellyfin, backups)\n"
@@ -131,9 +142,16 @@ async def help_cmd(ctx: commands.Context):
 
 
 async def _load() -> None:
+    # One bad cog used to kill startup outright, and restart:
+    # unless-stopped crash-looped the whole bot with nothing outside
+    # reporting it. Load each cog on its own so the rest still come
+    # up; the failure is loud in the log instead of fatal.
     for ext in ("cogs.music", "cogs.admin", "cogs.minecraft", "cogs.watch",
                 "cogs.starboard", "cogs.updates"):
-        await bot.load_extension(ext)
+        try:
+            await bot.load_extension(ext)
+        except Exception:
+            log.exception("failed to load %s - continuing without it", ext)
 
 
 if __name__ == "__main__":
