@@ -118,3 +118,15 @@ Watch (anyone):
   and one BACK UP message posts when it recovers. Silent while healthy.
 - HTTP checks are configurable in .env via WATCH_URLS (Name=URL pairs).
   Backup freshness needs the read-only backups mount in docker-compose.yml.
+
+Media requests (whitelisted admins only, silent to everyone else):
+- `!request Stranger Things` - whole show: all seasons monitored + searched
+- `!request Stranger Things season 1` - only season 1 monitored + searched
+- `!request Stranger Things S03E04` - only that episode searched
+- `!request Dune (2021)` - movie via Radarr (the year is optional)
+- A season/episode means TV (Sonarr); a bare title is looked up in both
+  Sonarr and Radarr. Several close matches = the bot asks which one.
+  Already downloaded = it says so and does nothing.
+- Setup: put SEERR_API_KEY in .env (see .env.example). New titles use
+  the root folder / quality profile of Seerr's default servers; the bot
+  never changes a Sonarr/Radarr setting.

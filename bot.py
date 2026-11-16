@@ -14,6 +14,8 @@ Modules:
   - updates:   patch / version tracker for 16 feeds (games, devices,
                iOS, free games), posting to #game-updates every 3 hours,
                with per-feed health alerts in the audit channel.
+  - media:     !request a show / season / episode (Sonarr) or a movie
+               (Radarr). Whitelisted user IDs only.
 
 (cogs/soundboard.py still exists in the repo but is NOT loaded -
 Victor killed !sfx on 2026-10-31 after seeing the native Discord
@@ -137,7 +139,9 @@ async def help_cmd(ctx: commands.Context):
         f"`{PREFIX}status` potofgreed service health (dashboard, Jellyfin, backups)\n"
         "Admins: mention me + plain English, e.g. `@HouseBot kick Marcus`, "
         "`@HouseBot create a private channel called planning for me and @Marcus` - "
-        "anything destructive asks you to confirm first."
+        "anything destructive asks you to confirm first.\n"
+        f"Admins: `{PREFIX}request <title>` gets a show or movie - add `season 2` "
+        "or `S03E04` for part of a show."
     )
 
 
@@ -147,7 +151,7 @@ async def _load() -> None:
     # reporting it. Load each cog on its own so the rest still come
     # up; the failure is loud in the log instead of fatal.
     for ext in ("cogs.music", "cogs.admin", "cogs.minecraft", "cogs.watch",
-                "cogs.starboard", "cogs.updates"):
+                "cogs.starboard", "cogs.updates", "cogs.media"):
         try:
             await bot.load_extension(ext)
         except Exception:
