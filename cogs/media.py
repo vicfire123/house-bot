@@ -345,7 +345,7 @@ async def request_movie(radarr: Arr, movie: dict) -> str:
         "tmdbId": tmdb,
         "title": movie.get("title"),
         "year": movie.get("year"),
-        "titleSlug": str(tmdb),
+        "titleSlug": movie.get("titleSlug") or str(tmdb),
         "qualityProfileId": defaults["qualityProfileId"],
         "rootFolderPath": defaults["rootFolderPath"],
         "minimumAvailability": "released",
