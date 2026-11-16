@@ -5,6 +5,9 @@ the big public bots), but YouTube still changes its player every few
 weeks - when playback breaks, update yt-dlp first:
     docker compose exec house-bot pip install -U yt-dlp
     docker compose restart house-bot
+Then bump the yt-dlp pin in requirements.txt to the new version and
+push it, or the next rebuild reinstalls the old pinned one from the
+cached pip layer and the fix reverts.
 
 Design rule for this module (learned the hard way): NEVER die silently.
 Every failure - extraction, voice connect, ffmpeg, opus - is reported
@@ -345,6 +348,21 @@ class Music(commands.Cog):
                                   "buttons work for anyone in the voice channel")
         return embed
 
+    async def _voice_check(self, ctx: commands.Context) -> bool:
+        """Command gate: the invoker must be in the bot's voice channel.
+        Without this, anyone in text chat could !stop somebody else's
+        music. Same rule as the panel buttons, for the !commands."""
+        vc = ctx.guild.voice_client if ctx.guild else None
+        ok = (
+            ctx.author.voice is not None
+            and ctx.author.voice.channel is not None
+            and vc is not None
+            and ctx.author.voice.channel == vc.channel
+        )
+        if not ok:
+            await ctx.send("Hop in the voice channel with the music first.")
+        return ok
+
     async def _panel_check(self, interaction: discord.Interaction) -> bool:
         """Panel gate: the presser must be in the bot's voice channel."""
         member = interaction.user
@@ -447,8 +465,24 @@ class Music(commands.Cog):
                     p.current = None
                     continue
                 done = asyncio.Event()
+
+                def _after(err):
+                    # vc.play reports mid-track failures here - the old
+                    # code threw the error away, so a track dying
+                    # mid-play looked like it just ended. Log it and
+                    # tell the channel what happened.
+                    if err is not None:
+                        log.error("playback error for %s: %s",
+                                  track.title, err)
+                        asyncio.run_coroutine_threadsafe(
+                            self._announce(
+                                p, f"⚠️ **{track.title}** died mid-play: "
+                                f"{err}"),
+                            self.bot.loop)
+                    self.bot.loop.call_soon_threadsafe(done.set)
+
                 try:
-                    vc.play(source, after=lambda _e: self.bot.loop.call_soon_threadsafe(done.set))
+                    vc.play(source, after=_after)
                 except Exception as e:
                     log.exception("voice play failed")
                     await self._announce(p, f"Couldn't start **{track.title}**: {e}")
@@ -505,6 +539,8 @@ class Music(commands.Cog):
 
     @commands.command(name="skip")
     async def skip(self, ctx: commands.Context):
+        if not await self._voice_check(ctx):
+            return
         vc = ctx.guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
             vc.stop()
@@ -514,6 +550,8 @@ class Music(commands.Cog):
 
     @commands.command(name="pause")
     async def pause(self, ctx: commands.Context):
+        if not await self._voice_check(ctx):
+            return
         vc = ctx.guild.voice_client
         if vc and vc.is_playing():
             vc.pause()
@@ -522,6 +560,8 @@ class Music(commands.Cog):
 
     @commands.command(name="resume")
     async def resume(self, ctx: commands.Context):
+        if not await self._voice_check(ctx):
+            return
         vc = ctx.guild.voice_client
         if vc and vc.is_paused():
             vc.resume()
@@ -531,11 +571,15 @@ class Music(commands.Cog):
     @commands.command(name="stop")
     async def stop(self, ctx: commands.Context):
         """Stop playback and clear the queue (stays in the channel)."""
+        if not await self._voice_check(ctx):
+            return
         await self._stop_player(ctx.guild)
         await ctx.send("Stopped, queue cleared.")
 
     @commands.command(name="leave")
     async def leave(self, ctx: commands.Context):
+        if not await self._voice_check(ctx):
+            return
         vc = ctx.guild.voice_client
         if vc:
             await self._delete_panel(self.player(ctx.guild.id))

@@ -25,9 +25,13 @@ driver, so that feed never fired once):
                    season changes are picked up on their own; both COD
                    feeds fall back to their last known page if the
                    index ever stops listing links)
-    - GTA 6 (PS5)  rockstargames.com/VI page watcher until launch
-                   (Nov 19, 2026 per the page itself), then the same
-                   watcher catches the flip to available / new info
+    - GTA 6 (PS5)  rockstargames.com/VI page watcher, launch-aware:
+                   "Coming <date>" until launch (Nov 19, 2026 per the
+                   page itself), then ONE "out now" post and the feed
+                   goes dormant - post-launch title updates need a new
+                   source (Rockstar Support is the candidate; the
+                   Newswire page is a JS shell and its get-posts
+                   endpoint 404s, verified 2026-11-16)
   APIs:
     - ONE PIECE Treasure Cruise (iTunes lookup id 943690848)
     - Pokemon Masters EX (iTunes lookup id 1442061397)
@@ -54,8 +58,19 @@ Mechanics:
   - Failure isolation: one broken feed never blocks the others, and a
     failed fetch never advances that feed's state (so a missed patch
     still posts on the next good run).
-  - At most 3 posts per feed per run, oldest first, so a backlog after
-    downtime cannot flood the channel.
+  - Health: every feed records its last good check in
+    /data/updates-health.json. A feed with no good check for 24h gets
+    ONE alert in the audit channel, and !updates marks its label stale
+    ("no good check since ...") instead of showing it as healthy.
+  - Free-game feeds track a SET of seen ids (Epic/Steam return
+    unordered sets - one "newest" id both missed drops and reposted
+    them). Only items actually posted join the set.
+  - At most 3 posts per feed per run, oldest first, and overflow is
+    never dropped - it posts on the next poll. State advances only to
+    the newest item actually posted, so a mid-batch failure reposts
+    just the failed item.
+  - If a post target was deleted, the cached channel is cleared so
+    the next poll re-resolves (or recreates) it.
   - !updates lists the last known item per feed.
 """
 
@@ -82,11 +97,24 @@ MAX_POSTS_PER_FEED = 3
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 
-DATA_FILE = os.environ.get(
-    "UPDATES_DATA_FILE",
+# Empty env value means "not set" (an empty UPDATES_DATA_FILE= line in
+# .env used to make this "" and silently break every save - the file
+# path is derived the same way starboard.py does it).
+_raw_data_file = os.environ.get("UPDATES_DATA_FILE", "").strip()
+DATA_FILE = _raw_data_file or (
     "/data/updates-state.json" if os.path.isdir("/data")
-    else os.path.join(os.path.dirname(__file__), "updates-state.json"),
+    else os.path.join(os.path.dirname(__file__), "updates-state.json")
 )
+# Per-feed health (last good check, last failure, alert sent) lives in
+# a second file next to the state file so the state shape never changes.
+HEALTH_FILE = os.path.join(os.path.dirname(DATA_FILE),
+                           "updates-health.json")
+# A feed with no good check for this long gets ONE alert in the audit
+# channel, then stays quiet until it recovers.
+FEED_ALERT_AFTER_HOURS = 24
+# Free-game feeds track a set of seen IDs (not one newest ID) so an
+# unordered source can never make a drop get missed or reposted.
+MAX_SEEN_IDS = 50
 
 COD_INDEX_URL = "https://www.callofduty.com/patchnotes/"
 # Fallbacks if the index ever stops listing links: the last known
@@ -125,6 +153,7 @@ class Updates(commands.Cog):
         self._channel: discord.TextChannel | None = None
         self._lock = asyncio.Lock()
         self.state: dict = self._load()
+        self.health: dict = self._load_health()
 
     # ---------- lifecycle ----------
 
@@ -162,6 +191,21 @@ class Updates(commands.Cog):
             with open(DATA_FILE, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
+                # Prune orphan keys (e.g. "nvidia" - feed removed Nov
+                # 10): no feed reads them, and leaving them makes the
+                # file lie about what is tracked. A feed's ":seen" set
+                # (free-game feeds) is a real key and survives.
+                known = {f["key"] for f in FEEDS}
+                known |= {k + ":seen" for k in known}
+                orphans = [k for k in data if k not in known]
+                if orphans:
+                    for k in orphans:
+                        del data[k]
+                    log.info("updates state: pruned orphan keys %s", orphans)
+                    tmp = DATA_FILE + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as out:
+                        json.dump(data, out, indent=1, sort_keys=True)
+                    os.replace(tmp, DATA_FILE)
                 log.info("updates state loaded: %d feeds seeded", len(data))
                 return data
         except FileNotFoundError:
@@ -306,26 +350,42 @@ class Updates(commands.Cog):
                       f"Patch notes updated - {latest}", url)]
 
     async def _feed_gta6(self):
+        """GTA VI page watcher, launch-aware (fixed 2026-11-16).
+
+        Pre-launch: the page says "Coming <date>" - track that date.
+        After launch the word "Coming" leaves the page. The old code
+        then fell back to the FIRST date anywhere on the page (trailer
+        dates, copyright, news) and still labelled it "Coming", reposting
+        whenever that date changed - so the fallback is gone. Launch day
+        posts exactly ONE "out now" item (stable id, never reposts),
+        then the feed goes dormant: post-launch title updates need a
+        new source (Rockstar Support title updates is the candidate -
+        the Newswire page is a JS shell and its get-posts endpoint
+        404s, both verified 2026-11-16). If the page changes shape
+        with no clear launch marker, say nothing and let the last_ok
+        alert flag the feed instead of guessing."""
         html = await self._get_text(GTA_URL)
         if html is None:
             return None
-        dates = DATE_RE.findall(html)
         preorder = "Pre-Order Now" in html
-        release = ""
         idx = html.find("Coming")
         if idx != -1:
             nearby = DATE_RE.search(html[idx:idx + 200])
             if nearby:
                 release = nearby.group(0)
-        if not release and dates:
-            release = dates[0]
-        if not release:
-            log.warning("GTA page fetched but no release date found")
-            return None
-        label = f"Official page: Coming {release}"
-        if preorder:
-            label += " - pre-orders open"
-        return [_item(f"gta-{release}-{int(preorder)}", label, GTA_URL)]
+                label = f"Official page: Coming {release}"
+                if preorder:
+                    label += " - pre-orders open"
+                return [_item(f"gta-{release}-{int(preorder)}",
+                              label, GTA_URL)]
+        if ("Available Now" in html or "Out Now" in html
+                or "Buy Now" in html):
+            return [_item("gta-launched",
+                          "GTA VI is out now - available on PS5",
+                          GTA_URL)]
+        log.warning("GTA page changed shape: no 'Coming' and no launch "
+                    "marker - staying silent")
+        return []
 
     async def _itunes_app(self, track_id: int):
         url = f"https://itunes.apple.com/lookup?id={track_id}&country=us"
@@ -368,7 +428,9 @@ class Updates(commands.Cog):
             m = re.match(r"iOS (\d+)", title)
             if not m:
                 continue
-            if "beta" in title.lower() or "Release Candidate" in title:
+            if ("beta" in title.lower()
+                    or "Release Candidate" in title
+                    or re.search(r"\bRC\b", title)):
                 continue
             link = (node.findtext("link") or "").strip()
             items.append((int(m.group(1)),
@@ -399,7 +461,9 @@ class Updates(commands.Cog):
         if html is None:
             return None
         best = None  # (release date, build)
-        for row in re.findall(r"<tr>(.*?)</tr>", html, re.S):
+        # <tr[^>]*> not a bare <tr>: the parser must survive SamMobile
+        # adding attributes to its table rows.
+        for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
             m = re.search(r"/SM-S918U/TMB/download/(S918U[A-Z0-9]+)/",
                           row)
             if not m:
@@ -541,7 +605,7 @@ class Updates(commands.Cog):
         for guild in self.bot.guilds:
             try:
                 channel = await guild.create_text_channel(
-                    CHANNEL_NAME, topic="Game, driver and iOS update posts "
+                    CHANNEL_NAME, topic="Game and device update posts "
                                         "from VicBot.")
                 log.info("created #%s in %s", CHANNEL_NAME, guild.name)
                 self._channel = channel
@@ -552,15 +616,145 @@ class Updates(commands.Cog):
         log.error("no #%s channel available in any guild", CHANNEL_NAME)
         return None
 
+    # ---------- feed health: dead feeds must not look healthy ----------
+
+    def _load_health(self) -> dict:
+        try:
+            with open(HEALTH_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.exception("feed health load failed - starting empty")
+        return {}
+
+    def _save_health(self) -> None:
+        try:
+            folder = os.path.dirname(HEALTH_FILE)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+            tmp = HEALTH_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.health, fh, indent=1, sort_keys=True)
+            os.replace(tmp, HEALTH_FILE)
+        except Exception:
+            log.exception("feed health save failed")
+
+    def _health_entry(self, key: str) -> dict:
+        return self.health.setdefault(
+            key, {"last_ok": None, "last_fail": None, "first_fail": None,
+                  "alerted": False})
+
+    def _record_ok(self, key: str) -> None:
+        entry = self._health_entry(key)
+        entry["last_ok"] = datetime.now(timezone.utc).isoformat()
+        entry["last_fail"] = None
+        entry["first_fail"] = None
+        if entry["alerted"]:
+            entry["alerted"] = False
+            log.info("feed %s recovered - alert flag cleared", key)
+        self._save_health()
+
+    async def _record_fail(self, feed: dict) -> None:
+        key = feed["key"]
+        entry = self._health_entry(key)
+        now = datetime.now(timezone.utc)
+        entry["last_fail"] = now.isoformat()
+        if entry.get("first_fail") is None:
+            # Start of this failure streak - the alert clock measures
+            # ~24h of CONTINUOUS failure, so a feed that never had a
+            # good check does not alert on its very first bad poll.
+            entry["first_fail"] = now.isoformat()
+        self._save_health()
+        if entry["alerted"]:
+            return
+        first_fail = self._parse_iso(entry.get("first_fail"))
+        if first_fail is None:
+            return
+        if (now - first_fail).total_seconds() \
+                < FEED_ALERT_AFTER_HOURS * 3600:
+            return
+        entry["alerted"] = True
+        self._save_health()
+        last_ok = self._parse_iso(entry.get("last_ok"))
+        since = last_ok.strftime("%b %d, %Y") if last_ok else "never"
+        try:
+            from bot import audit
+            await audit(None,
+                        f"⚠️ **Tracker feed {feed['name']} has had no good "
+                        f"check in ~{FEED_ALERT_AFTER_HOURS}h** (last good: "
+                        f"{since}). Its source may be down or changed - "
+                        f"!updates still shows the last known label.")
+        except Exception:
+            log.exception("feed health alert failed for %s", key)
+
+    def _stale_note(self, key: str) -> str:
+        """What !updates appends when a feed's label is older than it
+        looks: quiet while healthy, explicit once it goes stale."""
+        entry = self.health.get(key) or {}
+        last_ok = self._parse_iso(entry.get("last_ok"))
+        if last_ok is None:
+            return (" (no good check yet - failing)"
+                    if entry.get("last_fail") else "")
+        age_h = (datetime.now(timezone.utc) - last_ok).total_seconds() / 3600
+        if age_h >= FEED_ALERT_AFTER_HOURS:
+            return f" (no good check since {last_ok.strftime('%b %d')})"
+        return ""
+
+    def _post_target(self, feed: dict, channel):
+        pref = feed.get("channel")
+        if pref and channel is not None:
+            found = discord.utils.get(channel.guild.text_channels,
+                                      name=pref)
+            if found is not None:
+                return found
+        return channel
+
+    async def _run_set_feed(self, feed: dict, items, channel) -> None:
+        """Free-game feeds: the source returns an unordered set, so one
+        stored 'newest' id can both miss a drop and repost one. Track
+        the whole set of seen ids instead; only items actually posted
+        join the set, so a backlog is never dropped, just deferred."""
+        key = feed["key"]
+        seen_ids = set(self.state.get(key + ":seen") or [])
+        fresh = [it for it in items if it["id"] not in seen_ids]
+        if not fresh:
+            keep = [it["id"] for it in items]
+            keep += [i for i in seen_ids if i not in keep]
+            self.state[key + ":seen"] = keep[:MAX_SEEN_IDS]
+            self._save()
+            return
+        target = self._post_target(feed, channel)
+        posted = None
+        posted_ids = []
+        for it in reversed(fresh[-MAX_POSTS_PER_FEED:]):
+            await self._post(feed, it, target)
+            posted = it
+            posted_ids.append(it["id"])
+        keep = posted_ids + [i for i in (it["id"] for it in items)
+                             if i in seen_ids]
+        keep += [i for i in seen_ids if i not in keep]
+        self.state[key + ":seen"] = keep[:MAX_SEEN_IDS]
+        if posted is not None:
+            self.state[key] = {"id": posted["id"],
+                               "label": posted["label"]}
+        self._save()
+
     async def _run_feed(self, feed: dict, channel) -> None:
         key = feed["key"]
         try:
             items = await getattr(self, feed["fetch"])()
         except Exception:
             log.exception("feed %s crashed", key)
+            await self._record_fail(feed)
             return
         if items is None:
-            return  # fetch failed; state untouched, retry next run
+            # Fetch failed; state untouched, retry next run.
+            await self._record_fail(feed)
+            return
+        self._record_ok(key)
         seen = self.state.get(key)
         if seen is None:
             # First successful contact seeds silently so old news never
@@ -569,11 +763,16 @@ class Updates(commands.Cog):
             # the first real patch would be swallowed as the seed.
             newest = items[0] if items else {"id": "", "label": "(none yet)"}
             self.state[key] = {"id": newest["id"], "label": newest["label"]}
+            if feed.get("set"):
+                self.state[key + ":seen"] = [it["id"] for it in items]
             self._save()
             log.info("feed %s seeded at %s", key, newest["label"])
             return
         if not items:
             return  # fetched fine, nothing relevant right now
+        if feed.get("set"):
+            await self._run_set_feed(feed, items, channel)
+            return
         newest = items[0]
         if seen["id"] == newest["id"]:
             return
@@ -584,18 +783,21 @@ class Updates(commands.Cog):
             fresh.append(it)
         else:
             fresh = items  # stored item scrolled out of the window
-        fresh = fresh[:MAX_POSTS_PER_FEED]
-        target = channel
-        pref = feed.get("channel")
-        if pref and channel is not None:
-            found = discord.utils.get(channel.guild.text_channels,
-                                      name=pref)
-            if found is not None:
-                target = found
+        # Oldest fresh items first, capped per run: overflow is never
+        # dropped, it just posts on the next poll.
+        fresh = fresh[-MAX_POSTS_PER_FEED:]
+        target = self._post_target(feed, channel)
+        posted = None
         for it in reversed(fresh):  # oldest first
             await self._post(feed, it, target)
-        self.state[key] = {"id": newest["id"], "label": newest["label"]}
-        self._save()
+            posted = it
+        if posted is not None:
+            # Advance only to the newest item actually posted, so a
+            # mid-batch failure reposts just the failed item, not the
+            # ones that already went out.
+            self.state[key] = {"id": posted["id"],
+                               "label": posted["label"]}
+            self._save()
 
     async def _post(self, feed: dict, it: dict, channel) -> None:
         embed = discord.Embed(title=f"{feed['emoji']} {feed['name']}",
@@ -613,6 +815,14 @@ class Updates(commands.Cog):
         try:
             await channel.send(embed=embed)
             log.info("posted update: %s - %s", feed["key"], it["label"])
+        except (discord.NotFound, discord.Forbidden):
+            # The target channel was deleted (or the bot lost access).
+            # Drop the cached channel so the next poll re-resolves it
+            # (or recreates it) instead of failing forever.
+            log.warning("post target gone for feed %s - clearing channel "
+                        "cache", feed["key"])
+            self._channel = None
+            raise
         except Exception:
             log.exception("post failed for feed %s", feed["key"])
             raise
@@ -651,7 +861,7 @@ class Updates(commands.Cog):
             seen = self.state.get(feed["key"])
             if seen:
                 lines.append(f"{feed['emoji']} **{feed['name']}** - "
-                             f"{seen['label']}")
+                             f"{seen['label']}{self._stale_note(feed['key'])}")
             else:
                 lines.append(f"{feed['emoji']} **{feed['name']}** - "
                              "no data yet (seeds on the first good check)")
@@ -686,12 +896,14 @@ FEEDS = [
     {"key": "xiaomi-pad8", "name": "Xiaomi Pad 8 HyperOS",
      "emoji": "📲", "color": 0xFF6900, "fetch": "_feed_xiaomi_pad8"},
     {"key": "epic-free", "name": "Epic Free Games", "emoji": "🎁",
-     "color": 0x444444, "fetch": "_feed_epic_free", "channel": "free-games"},
+     "color": 0x444444, "fetch": "_feed_epic_free", "channel": "free-games",
+     "set": True},
     {"key": "steam-free", "name": "Steam Freebies", "emoji": "🎁",
      "color": 0x1B78C4, "fetch": "_feed_steam_free",
-     "channel": "free-games"},
+     "channel": "free-games", "set": True},
     {"key": "gog-free", "name": "GOG Giveaways", "emoji": "🎁",
-     "color": 0x86328A, "fetch": "_feed_gog_free", "channel": "free-games"},
+     "color": 0x86328A, "fetch": "_feed_gog_free", "channel": "free-games",
+     "set": True},
 ]
 
 

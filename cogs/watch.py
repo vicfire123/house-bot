@@ -13,8 +13,18 @@ Alerting rule - signal, not noise: nothing posts while healthy.
 A check has to fail TWICE in a row before a DOWN alert fires, and
 exactly one BACK UP message fires when it recovers. Alerts go to
 the audit/log channel. !status runs every check live, for anyone.
+
+Hardening (2026-11-16, blind-pass fixes): the loop body is guarded
+so one bad probe can never kill the loop permanently (discord.py
+stops a tasks.loop on an unhandled exception); the backup probe
+tolerates files rotating mid-scan; the restore-test seen-count
+persists on the bot-data volume so results landing during a restart
+are announced; and every loop pings the Uptime Kuma push monitor
+(if KUMA_PUSH_URL is set in .env) so the bot has an alarm outside
+itself.
 """
 
+import json
 import logging
 import os
 import time
@@ -55,7 +65,17 @@ class Watch(commands.Cog):
         self.mc_address = MC_ADDRESS
         self.backup_dir = WATCH_BACKUP_DIR
         self.restore_results = WATCH_RESTORE_RESULTS
-        self._restore_seen = None  # lines of the results log already announced
+        # Uptime Kuma push-monitor URL (optional, from .env). Empty =
+        # no heartbeat; the bot still works, it just has no alarm
+        # outside itself.
+        self.kuma_url = os.environ.get("KUMA_PUSH_URL", "").strip()
+        # Restore-test seen-count persists on the bot-data volume so
+        # results landing during a restart are announced, not missed.
+        raw_seen = os.environ.get("RESTORE_SEEN_FILE", "").strip()
+        self._restore_seen_file = raw_seen or (
+            "/data/restore-seen.json" if os.path.isdir("/data")
+            else os.path.join(os.getcwd(), "restore-seen.json"))
+        self._restore_seen = self._load_restore_seen()
 
         host = MC_ADDRESS.rsplit(":", 1)[0] if ":" in MC_ADDRESS else MC_ADDRESS
         if WATCH_URLS_RAW:
@@ -103,19 +123,45 @@ class Watch(commands.Cog):
 
     def _probe_backup(self):
         try:
-            paths = [
-                os.path.join(self.backup_dir, name)
-                for name in os.listdir(self.backup_dir)
-            ]
+            names = os.listdir(self.backup_dir)
         except Exception:
             return None, "backups folder not mounted - check skipped"
-        if not paths:
+        if not names:
             return False, "backup folder is EMPTY"
-        newest = max(os.path.getmtime(p) for p in paths)
+        newest = None
+        for name in names:
+            try:
+                mtime = os.path.getmtime(
+                    os.path.join(self.backup_dir, name))
+            except OSError:
+                continue  # file rotated or deleted mid-scan - skip it
+            if newest is None or mtime > newest:
+                newest = mtime
+        if newest is None:
+            return None, "backup scan raced a rotation - check skipped"
         age_h = (time.time() - newest) / 3600
         if age_h <= BACKUP_MAX_AGE_HOURS:
             return True, f"newest backup is {age_h:.1f}h old"
         return False, f"newest backup is {age_h:.1f}h old (limit {BACKUP_MAX_AGE_HOURS}h)"
+
+    def _load_restore_seen(self):
+        try:
+            with open(self._restore_seen_file, encoding="utf-8") as fh:
+                return int(json.load(fh).get("seen", 0))
+        except Exception:
+            return None  # no file yet - seed on first read, as before
+
+    def _save_restore_seen(self):
+        try:
+            folder = os.path.dirname(self._restore_seen_file)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+            tmp = self._restore_seen_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"seen": self._restore_seen}, fh)
+            os.replace(tmp, self._restore_seen_file)
+        except Exception:
+            log.exception("restore-seen save failed")
 
     # ---------------- restore-test results: announce every new line ---------
 
@@ -141,6 +187,16 @@ class Watch(commands.Cog):
             return
         if self._restore_seen is None:
             self._restore_seen = len(lines)  # seed: never replay history
+            self._save_restore_seen()
+            return
+        if len(lines) < self._restore_seen:
+            # Log was rotated/truncated while the bot was down - the
+            # old lines are gone; treat the current file as seen so
+            # future results are not skipped.
+            log.info("restore-results log shrank (%d < %d) - re-seeding",
+                     len(lines), self._restore_seen)
+            self._restore_seen = len(lines)
+            self._save_restore_seen()
             return
         for line in lines[self._restore_seen :]:
             parsed = self._parse_restore_line(line)
@@ -162,6 +218,7 @@ class Watch(commands.Cog):
                     " Check ~/restore-test-results.log on the server.",
                 )
         self._restore_seen = len(lines)
+        self._save_restore_seen()
 
     def _last_restore_result(self):
         lines = self._restore_lines()
@@ -204,6 +261,16 @@ class Watch(commands.Cog):
 
     @tasks.loop(seconds=CHECK_EVERY_SECONDS)
     async def watch_loop(self):
+        try:
+            await self._watch_once()
+        except Exception:
+            # A tasks.loop STOPS permanently on an unhandled exception
+            # - one bad probe used to silence every health alert until
+            # restart. Log it and keep looping.
+            log.exception("watch loop iteration failed - continuing")
+        await self._heartbeat()
+
+    async def _watch_once(self):
         await self._apply(self.mc, await self._probe_mc())
         timeout = aiohttp.ClientTimeout(total=8)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -211,6 +278,22 @@ class Watch(commands.Cog):
                 await self._apply(self.http[name], await self._probe_http(session, url))
         await self._apply(self.backup, self._probe_backup())
         await self._announce_restore_results()
+
+    async def _heartbeat(self):
+        """Ping the Uptime Kuma push monitor (if configured) so the bot
+        has an alarm OUTSIDE itself. KUMA_PUSH_URL comes from .env -
+        create a Push monitor in Kuma and paste its URL there."""
+        if not self.kuma_url:
+            return
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self.kuma_url) as resp:
+                    if resp.status >= 400:
+                        log.warning("Kuma heartbeat answered HTTP %s",
+                                    resp.status)
+        except Exception:
+            log.warning("Kuma heartbeat failed", exc_info=True)
 
     @watch_loop.before_loop
     async def _wait_ready(self):
