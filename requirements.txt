@@ -12,3 +12,4 @@ yt-dlp==2026.10.26
 mcstatus==14.2.0
 PyNaCl==1.5.0
 spotipy==2.26.0
+curl-cffi==0.17.0
