@@ -2,7 +2,7 @@
 
 Victor's ask (2026-10-31, live deploy session): watch patch notes and
 version drops for the games and platforms the server cares about and
-post them to #game-updates. Feeds (16 - feeds 11-13 added later on
+post them to #game-updates. Feeds (17 - feeds 11-13 added later on
 2026-10-31 at Victor's ask: free game drops "everywhere, not just
 Epic"; those post to #free-games IF that channel exists, else
 #game-updates. Feed 14, COD Warzone, added 2026-11-07 at Victor's
@@ -11,7 +11,10 @@ ask: device updates for HIS hardware only. BLEACH Mirrors High
 added 2026-11-10 at Victor's ask, the same day the NVIDIA feed was
 REMOVED at his ask: NVIDIA's lookup service only ever answered
 workstation / data-center drivers, never a GeForce Game Ready
-driver, so that feed never fired once):
+driver, so that feed never fired once. NVIDIA RESTORED 2026-11-24
+with a fixed filter - see the NVIDIA entry below. GTA VI switched from
+the /VI page watcher to the Rockstar Support launch-updates article
+the same day):
 
   Steam official news (ISteamNews, no key needed):
     - NBA 2K27 (app 4356430)       patch-note posts only
@@ -25,14 +28,31 @@ driver, so that feed never fired once):
                    season changes are picked up on their own; both COD
                    feeds fall back to their last known page if the
                    index ever stops listing links)
-    - GTA 6 (PS5)  rockstargames.com/VI page watcher, launch-aware:
-                   "Coming <date>" until launch (Nov 19, 2026 per the
-                   page itself), then ONE "out now" post and the feed
-                   goes dormant - post-launch title updates need a new
-                   source (Rockstar Support is the candidate; the
-                   Newswire page is a JS shell and its get-posts
-                   endpoint 404s, verified 2026-11-16)
+    - GTA 6 (PS5)  Rockstar Support "GTA VI Launch Updates" article
+                   (switched 2026-11-24; the /VI page watcher posted
+                   its one "out now" item on Nov 19 and was never
+                   wired to patch notes, so 01.002.002 on Nov 23 went
+                   unreported). One item per dated entry
+                   "[Month D, YYYY] - <section>", bullets as notes.
+                   Fetched with curl_cffi impersonating Chrome: Akamai
+                   bot mitigation stalls plain aiohttp / curl forever
+                   on this host (verified Nov 24 from the sandbox and
+                   the bot container). No version number in the post -
+                   Rockstar does not publish one. Fallback if Akamai
+                   ever beats the impersonation (NOT built): Leonida
+                   Waypoint's fan patch log,
+                   https://leonidawaypoint.com/patch-notes - plain
+                   fetch works but it can lag up to a day.
   APIs:
+    - NVIDIA GeForce drivers (AjaxDriverService DriverManualLookup,
+      RTX 50 Series / RTX 5070 / Windows 11: psID=131 pfID=1070
+      osID=135). Posts ONLY a WHQL, non-beta release whose name has
+      "GeForce" or "RTX Driver Release" (NVIDIA renamed the family to
+      "NVIDIA RTX Driver Release 620" - the old GeForce-only filter
+      would have stayed silent forever) and NOT "Data Center",
+      "Quadro" or "RTX PRO". Hotfixes stay silent. The date is the
+      service's ReleaseDateTime as-is (it can differ from NVIDIA's
+      driver page - known quirk, not fixed on purpose)
     - ONE PIECE Treasure Cruise (iTunes lookup id 943690848)
     - Pokemon Masters EX (iTunes lookup id 1442061397)
     - BLEACH Mirrors High (iTunes lookup id 6758332966)
@@ -81,6 +101,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from html import unescape
@@ -123,7 +144,22 @@ COD_URL = ("https://www.callofduty.com/patchnotes/2026/10/"
            "call-of-duty-modern-warfare-4-launch-patch-notes")
 WARZONE_URL = ("https://www.callofduty.com/patchnotes/2026/11/"
                "call-of-duty-mw4-warzone-season-1-patch-notes")
-GTA_URL = "https://www.rockstargames.com/VI"
+GTA_SUPPORT_URL = ("https://support.rockstargames.com/articles/"
+                   "sN5pEdFYZdlvijKXd6xpJ/"
+                   "grand-theft-auto-vi-launch-updates-ps5-xbox-series-x-or-s")
+# NVIDIA AjaxDriverService: GeForce RTX 50 Series (psID=131), GeForce
+# RTX 5070 (pfID=1070), Windows 11 (osID=135) - walked live from
+# NVIDIA's lookupValueSearch.aspx on 2026-11-24. The old params
+# (psID=98 pfID=623 osID=57) are dead - do not reuse them.
+NVIDIA_URL = (
+    "https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/"
+    "services/AjaxDriverService.php?func=DriverManualLookup"
+    "&psID=131&pfID=1070&osID=135&languageCode=1033&beta=0&isWHQL=0"
+    "&dltype=-1&dch=1&upCRD=0&qnf=0&sort1=0&numberOfResults=1")
+NVIDIA_NAME_OK = ("GeForce", "RTX Driver Release")
+NVIDIA_NAME_BAD = ("Data Center", "Quadro", "RTX PRO")
+# Embed field values cap at 1024 chars.
+NOTES_MAX = 1000
 APPLE_RSS = "https://developer.apple.com/news/releases/rss/releases.rss"
 EPIC_URL = ("https://store-site-backend-static.ak.epicgames.com/"
             "freeGamesPromotions?locale=en-US&country=US"
@@ -144,6 +180,88 @@ DATE_RE = re.compile(r"(?:" + "|".join(MONTHS) + r") \d{1,2}, 20\d\d")
 
 def _item(item_id: str, label: str, url: str, extra: str = "") -> dict:
     return {"id": str(item_id), "label": label, "url": url, "extra": extra}
+
+
+_GTA_HEADER_RE = re.compile(
+    r"^\[?\s*(" + DATE_RE.pattern + r")\s*\]?\s*[-\u2013\u2014:]\s*(.+)$")
+_BLOCK_TAGS_RE = re.compile(
+    r"</?(?:p|div|br|h[1-6]|ul|ol|section|article|tr|table)\b[^>]*>", re.I)
+
+
+def _html_lines(html: str) -> list[str]:
+    """HTML -> visible text lines. <li> becomes a "- " bullet line,
+    block tags become line breaks, scripts and styles are dropped."""
+    html = re.sub(r"<(script|style|noscript)\b.*?</\1>", " ", html,
+                  flags=re.S | re.I)
+    html = re.sub(r"<li\b[^>]*>", "\n- ", html, flags=re.I)
+    html = _BLOCK_TAGS_RE.sub("\n", html)
+    html = re.sub(r"<[^>]+>", "", html)
+    lines = []
+    for raw in unescape(html).replace("\xa0", " ").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if line and line != "-":
+            lines.append(line)
+    return lines
+
+
+def _trim_notes(bullets: list[str]) -> str:
+    out = ""
+    for b in bullets:
+        line = b if b.startswith("- ") else f"- {b}"
+        nxt = f"{out}\n{line}" if out else line
+        if len(nxt) > NOTES_MAX:
+            return (out + "\n...") if out else line[:NOTES_MAX - 3] + "..."
+        out = nxt
+    return out
+
+
+def parse_gta_support(html: str) -> list[dict]:
+    """Rockstar Support "GTA VI Launch Updates" article -> one item per
+    dated entry, newest first. Entries are headed
+    "[Month D, YYYY] - <section>"; several sections on the same date
+    merge into one item. [] when no dated header is found."""
+    entries: dict[str, list[str]] = {}
+    current = None
+    for line in _html_lines(html):
+        m = _GTA_HEADER_RE.match(line)
+        if m:
+            current = m.group(1)
+            entries.setdefault(current, [])
+            continue
+        if current is not None and line.startswith("- "):
+            entries[current].append(line)
+    ordered = sorted(entries,
+                     key=lambda d: datetime.strptime(d, "%B %d, %Y"),
+                     reverse=True)
+    return [_item(f"gta-patch-{d}", f"Patch notes updated - {d}",
+                  GTA_SUPPORT_URL) | {"notes": _trim_notes(entries[d])}
+            for d in ordered]
+
+
+def parse_nvidia(data) -> list[dict] | None:
+    """AjaxDriverService JSON -> [item] for a WHQL GeForce-family
+    release, [] (silent) for anything else, None for a broken payload."""
+    try:
+        info = data["IDS"][0]["downloadInfo"]
+    except Exception:
+        log.warning("NVIDIA service returned an unexpected shape")
+        return None
+    name = urllib.parse.unquote(str(info.get("Name", "")))
+    if str(info.get("IsWHQL")) != "1" or str(info.get("IsBeta")) != "0":
+        return []  # hotfix / beta: stay silent
+    if not any(k in name for k in NVIDIA_NAME_OK) \
+            or any(k in name for k in NVIDIA_NAME_BAD):
+        log.info("NVIDIA check: service answered %r - not a GeForce "
+                 "family driver, staying silent", name)
+        return []
+    version = str(info.get("Version", "")).strip()
+    if not version:
+        return []
+    details = urllib.parse.unquote(str(info.get("DetailsURL", ""))) \
+        or "https://www.nvidia.com/en-us/drivers/"
+    return [_item(f"nvidia-{version}",
+                  f"GeForce Game Ready Driver {version}", details,
+                  extra=str(info.get("ReleaseDateTime", "")).strip())]
 
 
 class Updates(commands.Cog):
@@ -349,43 +467,47 @@ class Updates(commands.Cog):
         return [_item(f"wz-{slug}-{latest}",
                       f"Patch notes updated - {latest}", url)]
 
-    async def _feed_gta6(self):
-        """GTA VI page watcher, launch-aware (fixed 2026-11-16).
+    async def _get_text_browser(self, url: str) -> str | None:
+        """Fetch through curl_cffi with Chrome TLS impersonation - only
+        for hosts behind Akamai bot mitigation (Rockstar Support), where
+        plain aiohttp completes the TLS handshake and then never gets
+        an answer. curl_cffi is synchronous, so it runs in a worker
+        thread and never blocks the event loop."""
+        def _fetch() -> str | None:
+            from curl_cffi import requests as cffi_requests
+            resp = cffi_requests.get(url, impersonate="chrome", timeout=30)
+            if resp.status_code != 200:
+                log.warning("fetch %s -> HTTP %s (curl_cffi)", url,
+                            resp.status_code)
+                return None
+            return resp.text
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception:
+            log.exception("fetch failed (curl_cffi): %s", url)
+            return None
 
-        Pre-launch: the page says "Coming <date>" - track that date.
-        After launch the word "Coming" leaves the page. The old code
-        then fell back to the FIRST date anywhere on the page (trailer
-        dates, copyright, news) and still labelled it "Coming", reposting
-        whenever that date changed - so the fallback is gone. Launch day
-        posts exactly ONE "out now" item (stable id, never reposts),
-        then the feed goes dormant: post-launch title updates need a
-        new source (Rockstar Support title updates is the candidate -
-        the Newswire page is a JS shell and its get-posts endpoint
-        404s, both verified 2026-11-16). If the page changes shape
-        with no clear launch marker, say nothing and let the last_ok
-        alert flag the feed instead of guessing."""
-        html = await self._get_text(GTA_URL)
+    async def _feed_gta6(self):
+        """GTA VI title updates from Rockstar Support (2026-11-24).
+
+        None (not []) when the fetch fails or the article has no dated
+        entries, so the feed-health alert fires instead of the feed
+        looking healthy - never guess from the page shape."""
+        html = await self._get_text_browser(GTA_SUPPORT_URL)
         if html is None:
             return None
-        preorder = "Pre-Order Now" in html
-        idx = html.find("Coming")
-        if idx != -1:
-            nearby = DATE_RE.search(html[idx:idx + 200])
-            if nearby:
-                release = nearby.group(0)
-                label = f"Official page: Coming {release}"
-                if preorder:
-                    label += " - pre-orders open"
-                return [_item(f"gta-{release}-{int(preorder)}",
-                              label, GTA_URL)]
-        if ("Available Now" in html or "Out Now" in html
-                or "Buy Now" in html):
-            return [_item("gta-launched",
-                          "GTA VI is out now - available on PS5",
-                          GTA_URL)]
-        log.warning("GTA page changed shape: no 'Coming' and no launch "
-                    "marker - staying silent")
-        return []
+        items = parse_gta_support(html)
+        if not items:
+            log.warning("GTA Support article fetched but no dated "
+                        "entries found - page may have changed shape")
+            return None
+        return items
+
+    async def _feed_nvidia(self):
+        data = await self._get_json(NVIDIA_URL)
+        if not data:
+            return None
+        return parse_nvidia(data)
 
     async def _itunes_app(self, track_id: int):
         url = f"https://itunes.apple.com/lookup?id={track_id}&country=us"
@@ -875,6 +997,8 @@ FEEDS = [
      "color": 0x8A9A5B, "fetch": "_feed_cod"},
     {"key": "cod-warzone", "name": "COD: Warzone", "emoji": "🪂",
      "color": 0x4C7C9B, "fetch": "_feed_warzone"},
+    {"key": "nvidia", "name": "NVIDIA GeForce Drivers", "emoji": "🟢",
+     "color": 0x76B900, "fetch": "_feed_nvidia"},
     {"key": "gta6", "name": "GTA VI (PS5)", "emoji": "🌴",
      "color": 0xF2A03D, "fetch": "_feed_gta6"},
     {"key": "pbz", "name": "Phantom Blade Zero (Steam)", "emoji": "⚔️",

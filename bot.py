@@ -11,8 +11,8 @@ Modules:
   - watch:     potofgreed service health checks every 2 minutes -
                DOWN / back-up alerts in the log channel, plus !status.
   - starboard: 1 ⭐ on any human message reposts it to #starboard.
-  - updates:   patch / version tracker for 16 feeds (games, devices,
-               iOS, free games), posting to #game-updates every 3 hours,
+  - updates:   patch / version tracker for 17 feeds (games, NVIDIA
+               drivers, devices, iOS, free games), posting to #game-updates every 3 hours,
                with per-feed health alerts in the audit channel.
   - media:     !request a show / season / episode (Sonarr) or a movie
                (Radarr). Whitelisted user IDs only.
@@ -133,7 +133,7 @@ async def help_cmd(ctx: commands.Context):
         "pause / skip / stop / queue buttons posts with each track\n"
         f"`{PREFIX}skip` / `{PREFIX}stop` / `{PREFIX}queue` / `{PREFIX}np` / `{PREFIX}leave`\n"
         f"`{PREFIX}panel` re-drop the music player panel at the bottom of the channel\n"
-        f"`{PREFIX}updates` last known patch / version for every tracked game, device and iOS, plus free game drops from Epic, Steam and GOG (posts land in #game-updates)\n"
+        f"`{PREFIX}updates` last known patch / version for every tracked game, NVIDIA drivers, device and iOS, plus free game drops from Epic, Steam and GOG (posts land in #game-updates)\n"
         "Star a message with ⭐ and it lands in #starboard\n"
         f"`{PREFIX}mc` Minecraft server status\n"
         f"`{PREFIX}status` potofgreed service health (dashboard, Jellyfin, backups)\n"
