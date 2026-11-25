@@ -104,6 +104,7 @@ import re
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html import unescape
 
 import aiohttp
@@ -555,9 +556,15 @@ class Updates(commands.Cog):
                     or re.search(r"\bRC\b", title)):
                 continue
             link = (node.findtext("link") or "").strip()
+            when = ""
+            try:
+                when = parsedate_to_datetime(
+                    node.findtext("pubDate") or "").strftime("%b %d, %Y")
+            except Exception:
+                pass
             items.append((int(m.group(1)),
                           _item(node.findtext("guid") or title, title,
-                                link)))
+                                link, extra=when)))
         if not items:
             return []
         # Only the current iOS generation can install on Victor's
@@ -825,6 +832,48 @@ class Updates(commands.Cog):
             return f" (no good check since {last_ok.strftime('%b %d')})"
         return ""
 
+    def _remember(self, key: str, it: dict) -> None:
+        """What !updates shows per feed: label plus its link and date."""
+        self.state[key] = {"id": it.get("id", ""),
+                           "label": it.get("label", ""),
+                           "url": it.get("url", ""),
+                           "extra": it.get("extra", "")}
+
+    def _refresh_details(self, key: str, items) -> bool:
+        """State written before 2026-11-24 kept only id + label. When a
+        good fetch still lists the stored item, copy its link and date
+        in, so !updates gains them on the next poll with no repost."""
+        seen = self.state.get(key)
+        if not seen or not seen.get("id"):
+            return False
+        for it in items:
+            if it["id"] == seen["id"]:
+                url, extra = it.get("url", ""), it.get("extra", "")
+                if seen.get("url") == url and seen.get("extra") == extra:
+                    return False
+                seen["url"], seen["extra"] = url, extra
+                return True
+        return False
+
+    def _updates_lines(self) -> list[str]:
+        lines = []
+        for feed in FEEDS:
+            seen = self.state.get(feed["key"])
+            head = f"{feed['emoji']} **{feed['name']}** - "
+            if not seen:
+                lines.append(head + "no data yet (seeds on the first good "
+                                    "check)")
+                continue
+            label = seen.get("label", "")
+            url = seen.get("url") or FALLBACK_URLS.get(feed["key"], "")
+            safe = label.replace("[", "(").replace("]", ")")
+            text = f"[{safe}]({url})" if url else label
+            extra = seen.get("extra", "")
+            if extra and extra not in label:
+                text += f" ({extra})"
+            lines.append(head + text + self._stale_note(feed["key"]))
+        return lines
+
     def _post_target(self, feed: dict, channel):
         pref = feed.get("channel")
         if pref and channel is not None:
@@ -860,8 +909,7 @@ class Updates(commands.Cog):
         keep += [i for i in seen_ids if i not in keep]
         self.state[key + ":seen"] = keep[:MAX_SEEN_IDS]
         if posted is not None:
-            self.state[key] = {"id": posted["id"],
-                               "label": posted["label"]}
+            self._remember(key, posted)
         self._save()
 
     async def _run_feed(self, feed: dict, channel) -> None:
@@ -884,7 +932,7 @@ class Updates(commands.Cog):
             # before its first patch), seed EMPTY instead - otherwise
             # the first real patch would be swallowed as the seed.
             newest = items[0] if items else {"id": "", "label": "(none yet)"}
-            self.state[key] = {"id": newest["id"], "label": newest["label"]}
+            self._remember(key, newest)
             if feed.get("set"):
                 self.state[key + ":seen"] = [it["id"] for it in items]
             self._save()
@@ -892,6 +940,8 @@ class Updates(commands.Cog):
             return
         if not items:
             return  # fetched fine, nothing relevant right now
+        if self._refresh_details(key, items):
+            self._save()
         if feed.get("set"):
             await self._run_set_feed(feed, items, channel)
             return
@@ -917,8 +967,7 @@ class Updates(commands.Cog):
             # Advance only to the newest item actually posted, so a
             # mid-batch failure reposts just the failed item, not the
             # ones that already went out.
-            self.state[key] = {"id": posted["id"],
-                               "label": posted["label"]}
+            self._remember(key, posted)
             self._save()
 
     async def _post(self, feed: dict, it: dict, channel) -> None:
@@ -976,18 +1025,33 @@ class Updates(commands.Cog):
 
     @commands.command(name="updates")
     async def updates(self, ctx: commands.Context):
-        """!updates - last known item per tracked feed."""
-        lines = [f"**Tracked updates** (posting to #{CHANNEL_NAME}, "
-                 f"checked every {POLL_HOURS}h):"]
-        for feed in FEEDS:
-            seen = self.state.get(feed["key"])
-            if seen:
-                lines.append(f"{feed['emoji']} **{feed['name']}** - "
-                             f"{seen['label']}{self._stale_note(feed['key'])}")
-            else:
-                lines.append(f"{feed['emoji']} **{feed['name']}** - "
-                             "no data yet (seeds on the first good check)")
-        await ctx.send("\n".join(lines))
+        """!updates - last known item per tracked feed, with links."""
+        title = "Tracked updates"
+        footer = (f"Posting to #{CHANNEL_NAME}, checked every "
+                  f"{POLL_HOURS}h - tap an item to open it")
+        chunks, cur = [], ""
+        for line in self._updates_lines():
+            if len(cur) + len(line) + 1 > 4000:
+                chunks.append(cur)
+                cur = ""
+            cur = f"{cur}\n{line}" if cur else line
+        chunks.append(cur)
+        for i, body in enumerate(chunks):
+            embed = discord.Embed(title=title if i == 0 else None,
+                                  description=body, color=0x5865F2)
+            if i == len(chunks) - 1:
+                embed.set_footer(text=footer)
+            await ctx.send(embed=embed)
+
+
+# !updates falls back to these when a feed has never stored a link
+# (a source that has been failing since before links were stored).
+FALLBACK_URLS = {
+    "samsung-s23u": SAMSUNG_URL,
+    "xiaomi-pad8": XIAOMI_URL,
+    "gta6": GTA_SUPPORT_URL,
+    "ios": "https://developer.apple.com/news/releases/",
+}
 
 
 FEEDS = [

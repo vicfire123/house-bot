@@ -229,5 +229,97 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(cog.posted), 1)  # no repost next poll
 
 
+
+class UpdatesCommandTests(unittest.TestCase):
+    """!updates shows a link and date per feed (2026-11-24)."""
+
+    def _cog(self, state, health=None):
+        cog = updates.Updates.__new__(updates.Updates)
+        cog.state = state
+        cog.health = health or {}
+        cog._save = lambda: None
+        cog._save_health = lambda: None
+        return cog
+
+    def test_old_state_backfills_link_and_date_without_repost(self):
+        cog = self._cog({"nvidia": {"id": "nvidia-621.40",
+                                    "label": "GeForce Game Ready Driver 621.40"}})
+        posted = []
+
+        async def fake_post(feed, it, channel):
+            posted.append(it["id"])
+        cog._post = fake_post
+        data = json.loads(fixture("nvidia_rtx_620.json"))
+        data["IDS"][0]["downloadInfo"]["Version"] = "621.40"
+
+        async def fake_json(url):
+            return data
+        cog._get_json = fake_json
+        feed = next(f for f in updates.FEEDS if f["key"] == "nvidia")
+        run(cog._run_feed(feed, channel=object()))
+        self.assertEqual(posted, [])
+        self.assertEqual(cog.state["nvidia"]["url"],
+                         "https://www.nvidia.com/en-us/drivers/details/285521/")
+        self.assertEqual(cog.state["nvidia"]["extra"], "Wed Nov 18, 2026")
+
+    def test_line_has_masked_link_and_date(self):
+        cog = self._cog({"bleach-mirrors-high": {
+            "id": "app-1", "label": "Version 1.1.0",
+            "url": "https://apps.apple.com/app/id6758332966",
+            "extra": "2026-11-24"}})
+        line = next(l for l in cog._updates_lines() if "BLEACH" in l)
+        self.assertIn("[Version 1.1.0](https://apps.apple.com/app/id6758332966)",
+                      line)
+        self.assertIn("(2026-11-24)", line)
+
+    def test_date_not_repeated_when_in_label(self):
+        cog = self._cog({"gta6": {"id": "g", "label":
+                                  "Patch notes updated - November 23, 2026",
+                                  "url": "https://x", "extra": "November 23, 2026"}})
+        line = next(l for l in cog._updates_lines() if "GTA" in l)
+        self.assertEqual(line.count("November 23, 2026"), 1)
+
+    def test_failing_feed_uses_fallback_link(self):
+        cog = self._cog({"samsung-s23u": {"id": "sam-x",
+                                          "label": "Firmware S918USQU8GZIF"}})
+        line = next(l for l in cog._updates_lines() if "Galaxy" in l)
+        self.assertIn(f"]({updates.SAMSUNG_URL})", line)
+
+    def test_brackets_in_label_cannot_break_link(self):
+        cog = self._cog({"fh6": {"id": "x", "label": "Patch [Series 7]",
+                                 "url": "https://x"}})
+        line = next(l for l in cog._updates_lines() if "Forza" in l)
+        self.assertIn("[Patch (Series 7)](https://x)", line)
+
+    def test_full_listing_fits_embeds(self):
+        long_url = "https://example.com/" + "a" * 180
+        state = {f["key"]: {"id": "i", "label": "L" * 60, "url": long_url,
+                            "extra": "Nov 24, 2026"} for f in updates.FEEDS}
+        cog = self._cog(state)
+        sent = []
+
+        class Ctx:
+            async def send(self, embed=None, **kw):
+                sent.append(embed)
+        run(updates.Updates.updates.callback(cog, Ctx()))
+        self.assertTrue(sent)
+        self.assertTrue(all(len(e.description) <= 4096 for e in sent))
+        body = "\n".join(e.description for e in sent)
+        self.assertEqual(body.count(long_url), len(updates.FEEDS))
+
+    def test_ios_carries_pubdate(self):
+        cog = self._cog({})
+        rss = ("<rss><channel><item><title>iOS 27.2.1 (24B91034)</title>"
+               "<link>https://developer.apple.com/news/releases/?id=1</link>"
+               "<guid>g1</guid><pubDate>Mon, 17 Nov 2026 10:00:00 PST</pubDate>"
+               "</item></channel></rss>")
+
+        async def fake_text(url):
+            return rss
+        cog._get_text = fake_text
+        items = run(cog._feed_ios())
+        self.assertEqual(items[0]["extra"], "Nov 17, 2026")
+
+
 if __name__ == "__main__":
     unittest.main()
